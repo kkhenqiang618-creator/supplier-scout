@@ -1,0 +1,300 @@
+{
+ "generated": "2026-11-11 16:33:47",
+ "moli": "runtime/moli",
+ "expected_qr_payload": [
+  "https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD"
+ ],
+ "note": "pass=true 的检查由 tests/browser_regression.py 断言；pass=false 为当前已知缺口，后续改进应翻转为 true 并重写基线。",
+ "checks": [
+  {
+   "check": "footer_contacts.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:56393/footer_contacts.html",
+   "seconds": 1.44
+  },
+  {
+   "check": "footer_contacts.text_length",
+   "pass": true,
+   "detail": "179"
+  },
+  {
+   "check": "footer_contacts.not_render_weak",
+   "pass": true,
+   "detail": "None"
+  },
+  {
+   "check": "footer_contacts.control_role",
+   "pass": true,
+   "detail": "['link', 'link', 'link']"
+  },
+  {
+   "check": "footer_contacts.observed:sales@xinghe-fixture.com",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "footer_contacts.observed:735812946",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "footer_contacts.observed:https://t.me/xinghe_fixture_sales",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "modal_vue.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:56393/modal_vue.html",
+   "seconds": 3.21
+  },
+  {
+   "check": "modal_vue.text_length",
+   "pass": true,
+   "detail": "98"
+  },
+  {
+   "check": "modal_vue.dialog_deduped",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "modal_vue.observed:yunchuan_biz2026",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "modal_vue.dialog_captured",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "modal_vue.image_count",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "modal_vue.qr_decoded",
+   "pass": true,
+   "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
+   "seconds": 0.13
+  },
+  {
+   "check": "modal_aria.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:56393/modal_aria.html",
+   "seconds": 3.12
+  },
+  {
+   "check": "modal_aria.text_length",
+   "pass": true,
+   "detail": "114"
+  },
+  {
+   "check": "modal_aria.observed:partner@neon-fixture.cn",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "modal_aria.dialog_captured",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "qr_canvas.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:56393/qr_canvas.html",
+   "seconds": 3.14
+  },
+  {
+   "check": "qr_canvas.text_length",
+   "pass": true,
+   "detail": "51"
+  },
+  {
+   "check": "qr_canvas.observed:扫码联系客服",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "qr_canvas.image_count",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "qr_canvas.qr_decoded",
+   "pass": true,
+   "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
+   "seconds": 0.31
+  },
+  {
+   "check": "qr_background.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:56393/qr_background.html",
+   "seconds": 3.11
+  },
+  {
+   "check": "qr_background.text_length",
+   "pass": true,
+   "detail": "45"
+  },
+  {
+   "check": "qr_background.observed:扫码添加商务微信",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "qr_background.image_count",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "qr_background.qr_decoded",
+   "pass": true,
+   "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
+   "seconds": 0.12
+  },
+  {
+   "check": "qr_datauri.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:56393/qr_datauri.html",
+   "seconds": 3.13
+  },
+  {
+   "check": "qr_datauri.text_length",
+   "pass": true,
+   "detail": "47"
+  },
+  {
+   "check": "qr_datauri.observed:扫码联系商务客服",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "qr_datauri.image_count",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "qr_datauri.qr_decoded",
+   "pass": true,
+   "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
+   "seconds": 0.13
+  },
+  {
+   "check": "spa_slow.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:56393/spa_slow.html",
+   "seconds": 4.3
+  },
+  {
+   "check": "spa_slow.text_length",
+   "pass": true,
+   "detail": "65"
+  },
+  {
+   "check": "spa_slow.observed:jiguang_sales88",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "spa_slow.observed:biz@jiguang-fixture.com",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "spa_slow.after_wait_observed",
+   "pass": true,
+   "detail": "",
+   "seconds": 4.24
+  },
+  {
+   "check": "empty.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:56393/empty.html",
+   "seconds": 3.15
+  },
+  {
+   "check": "empty.text_length",
+   "pass": true,
+   "detail": "20"
+  },
+  {
+   "check": "empty.render_weak_flagged",
+   "pass": true,
+   "detail": "True"
+  },
+  {
+   "check": "empty.observed:本站页面暂无任何内容",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "modal_body_class.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:56393/modal_body_class.html",
+   "seconds": 0.73
+  },
+  {
+   "check": "modal_body_class.text_length",
+   "pass": true,
+   "detail": "12030"
+  },
+  {
+   "check": "modal_body_class.body_not_dialog",
+   "pass": true,
+   "detail": "['商务微信：biz_wx_777']"
+  },
+  {
+   "check": "modal_body_class.observed:biz_wx_777",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "modal_body_class.dialog_captured",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "hang.open",
+   "pass": true,
+   "detail": "c0",
+   "seconds": 3.35
+  },
+  {
+   "check": "hang.click_returns_within_15s",
+   "pass": true,
+   "detail": "ok",
+   "seconds": 3.51
+  },
+  {
+   "check": "hang.click_returns_within_5s",
+   "pass": true,
+   "detail": "ok",
+   "seconds": 3.51
+  },
+  {
+   "check": "hang.click_flagged_unresponsive",
+   "pass": true,
+   "detail": "页面脚本无响应"
+  },
+  {
+   "check": "hang.snapshot_returns_within_15s",
+   "pass": true,
+   "detail": "ok",
+   "seconds": 3.15
+  },
+  {
+   "check": "hang.close_within_10s",
+   "pass": true,
+   "detail": "",
+   "seconds": 0.02
+  },
+  {
+   "check": "stall.read_timeout_raises",
+   "pass": true,
+   "detail": "浏览器无响应",
+   "seconds": 3.01
+  }
+ ]
+}

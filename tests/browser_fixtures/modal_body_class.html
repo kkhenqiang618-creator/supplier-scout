@@ -1,0 +1,8 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>长页 + Element 弹窗</title>
+<style>.el-dialog{position:fixed;top:15%;left:30%;width:40%;background:#fff;padding:16px}</style></head>
+<body><div id="app"><h1>主页内容</h1><p id="fill"></p></div>
+<script>
+document.getElementById('fill').textContent='首页文字很多很多 '+'填充文本 '.repeat(2400);
+// Element UI adds el-popup-parent--hidden to <body> while an el-dialog is open; body must not be taken as the dialog.
+setTimeout(()=>{document.body.classList.add('el-popup-parent--hidden');const d=document.createElement('div');d.className='el-dialog';d.setAttribute('role','dialog');d.textContent='商务微信：biz_wx_777';document.body.appendChild(d)},300);
+</script></body></html>
