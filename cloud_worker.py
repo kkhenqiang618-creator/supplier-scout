@@ -32,7 +32,7 @@ def execute_job(store,job,owner,shutdown):
                     result={key:row[key] for key in ['contacts','offers','sources','warnings']}
                 else:
                     with tempfile.TemporaryDirectory(prefix='scout-provider-') as folder:
-                        config=store.model_service.materialize(folder)
+                        config=store.model_service.materialize(folder,snapshot=job['state'].get('_model_config',''))
                         result=collect_site(row['url'],log,stop,job['scope'],config,store.rules() if job['scope']=='all' else [])
                 with store.fenced(job['id'],owner) as (db,current):
                     if current['cancel_requested'] or stop.is_set():raise CollectionCancelled()

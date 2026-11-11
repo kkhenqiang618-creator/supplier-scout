@@ -11,6 +11,12 @@
 
 所有业务页面、接口和导出均需登录。没有注册入口或默认生产密码。会话仅保存随机 token 的 SHA256 摘要；模型 Key 使用独立环境密钥加密保存。源码不包含个人名单、数据库、截图或凭据。
 
+## 团队账号与个人模型配置
+
+生产环境用 `SCOUT_AUTH_USERS_JSON` 保存用户名到口令哈希的 JSON 映射（每项由 `auth.hash_password()` 生成），设置后取代旧的单账号配置。每位成员登录自己的账号，单独填写 API URL、模型名和 Key；新账号不继承历史共享 Key。供应商、报价规则和结果仍是团队共享。
+
+个人配置按已认证的会话身份保存，加密且不回显；请求参数不能指定其他账号。开始采集时复制发起人的加密配置到任务，后续修改不会改变已开始任务的 Key。任务接口不会返回配置快照。当前仍是全团队一次运行一个批次，由发起人停止。
+
 ## 本机运行
 
 ```sh
@@ -25,7 +31,8 @@ python3 server.py --port 8765
 | --- | --- |
 | `DATABASE_URL` | 私有应用角色的 Postgres TLS 连接地址 |
 | `SCOUT_ENCRYPTION_KEY` | 独立 Fernet 密钥，用于加密模型配置 |
-| `SCOUT_AUTH_USERNAME` / `SCOUT_AUTH_PASSWORD_HASH` | 登录名及 `auth.hash_password()` 生成的口令校验值 |
+| `SCOUT_AUTH_USERS_JSON` | 多账号用户名到 `auth.hash_password()` 校验值的 JSON 映射；优先于旧单账号配置 |
+| `SCOUT_AUTH_USERNAME` / `SCOUT_AUTH_PASSWORD_HASH` | 未设置多账号映射时的旧单账号配置 |
 | `SCOUT_VERCEL_PROJECT_ID` / `SCOUT_VERCEL_TEAM_ID` | 当前项目的浏览器进程管理范围 |
 
 云端浏览器启停使用当前生产项目的 Vercel OIDC 凭据；也支持独立的项目级 `SCOUT_VERCEL_SCALER_TOKEN`。凭据不返回浏览器，不写入源码。批次进度与停止标记保存在数据库。

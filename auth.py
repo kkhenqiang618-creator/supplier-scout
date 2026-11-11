@@ -104,6 +104,7 @@ class AuthManager:
             raise ValueError('SCOUT_AUTH_USERNAME is required')
         self.username = username
         self._verifier = _parse_hash(password_hash)
+        self._verifiers = {username:self._verifier}
         self.session_store = session_store if session_store is not None else MemorySessionStore()
         self.secure_cookie = secure_cookie
         self.session_ttl = int(session_ttl)
@@ -117,6 +118,17 @@ class AuthManager:
 
     @classmethod
     def from_env(cls, required=False, **kwargs):
+        users_json = os.environ.get('SCOUT_AUTH_USERS_JSON')
+        if users_json is not None:
+            try:
+                users = json.loads(users_json)
+                if not isinstance(users,dict) or not users or any(not isinstance(name,str) or not name.strip() or len(name)>256 for name in users):raise ValueError()
+                parsed = {name:_parse_hash(value) for name,value in users.items()}
+            except (ValueError,TypeError):raise ValueError('SCOUT_AUTH_USERS_JSON must map usernames to password hashes') from None
+            name = next(iter(users))
+            if 'allowed_origin' not in kwargs and os.environ.get('SCOUT_AUTH_ORIGIN'):kwargs['allowed_origin']=os.environ['SCOUT_AUTH_ORIGIN']
+            manager=cls(name,users[name],**kwargs);manager._verifiers=parsed
+            return manager
         username = os.environ.get('SCOUT_AUTH_USERNAME', '')
         password_hash = os.environ.get('SCOUT_AUTH_PASSWORD_HASH', '')
         if not username and not password_hash and not required:
@@ -128,13 +140,15 @@ class AuthManager:
         return cls(username, password_hash, **kwargs)
 
     def verify(self, username, password):
-        iterations, salt, expected = self._verifier
+        iterations, salt, expected = self._verifiers.get(username,self._verifier)
         digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, iterations)
-        return hmac.compare_digest(digest, expected) & hmac.compare_digest(username.encode('utf-8'), self.username.encode('utf-8'))
+        return hmac.compare_digest(digest, expected) & (username in self._verifiers)
 
-    def create_session(self):
+    def create_session(self, username=None):
+        username = self.username if username is None else username
+        if username not in self._verifiers:raise ValueError('未知账号')
         token = secrets.token_urlsafe(32)
-        self.session_store.create(self.username, self.token_hash(token), self.clock() + self.session_ttl)
+        self.session_store.create(username, self.token_hash(token), self.clock() + self.session_ttl)
         return token
 
     @staticmethod
@@ -149,7 +163,7 @@ class AuthManager:
         if not session:
             return None
         try:
-            valid = session['username'] == self.username and math.isfinite(float(session['expires_at'])) and float(session['expires_at']) > self.clock()
+            valid = session['username'] in self._verifiers and math.isfinite(float(session['expires_at'])) and float(session['expires_at']) > self.clock()
         except (KeyError, TypeError, ValueError):
             valid = False
         if not valid:
@@ -288,7 +302,7 @@ class AuthHandlerMixin:
             old_token = self._auth_token()
             if auth.authenticate(old_token):
                 auth.session_store.delete(auth.token_hash(old_token))
-            token = auth.create_session()
+            token = auth.create_session(data['username'])
             return self._auth_reply(200, {'ok':True, 'next':safe_next(data.get('next','/'))}, {'Set-Cookie':auth.cookie(token)})
         if not self._auth_guard(auth):
             return

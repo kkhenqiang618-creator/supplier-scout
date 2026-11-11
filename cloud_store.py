@@ -1,5 +1,6 @@
 """Private Postgres persistence and durable, fenced browser-job queue."""
 import contextlib
+import copy
 import json
 import os
 import re
@@ -68,19 +69,27 @@ class Database:
         finally:self.local.sql=None;connection.close()
 
 class CloudModelService(ModelService):
-    def __init__(self,database,key=None):
+    def __init__(self,database,key=None,username=None):
+        self.setting_key='model-service' if username is None else 'model-service:user:'+username
         self.database=database;self.lock=threading.RLock();self.cipher=Fernet((key or os.environ['SCOUT_ENCRYPTION_KEY']).encode())
     def read(self):
-        with self.database.transaction() as db:row=db.execute("SELECT value FROM settings WHERE key='model-service'").fetchone()
+        with self.database.transaction() as db:row=db.execute("SELECT value FROM settings WHERE key=?",(self.setting_key,)).fetchone()
         return json.loads(self.cipher.decrypt(row['value'].encode())) if row else {}
     def _write(self,data):
         value=self.cipher.encrypt(encode(data).encode()).decode()
-        with self.database.transaction(write=True) as db:db.execute("INSERT INTO settings(key,value) VALUES('model-service',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(value,))
+        with self.database.transaction(write=True) as db:db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(self.setting_key,value))
     def _finish_test(self,config,original_model,answer):
         with self.lock,self.database.transaction(write=True):
             return super()._finish_test(config,original_model,answer)
-    def materialize(self,folder):
-        path=Path(folder)/'model-service.json';ModelService(path)._write(self.read());return path
+    def snapshot(self):
+        config=self.read()
+        if not config.get('base_url') or not config.get('model') or not config.get('api_key'):raise ValueError('请先为当前账号填写 API URL、模型名和 API Key')
+        return self.cipher.encrypt(encode(config).encode()).decode()
+    def materialize(self,folder,snapshot=None):
+        if snapshot is None:config=self.read()
+        elif not snapshot:raise ValueError('该任务没有个人模型配置，请登录后重新发起采集')
+        else:config=json.loads(self.cipher.decrypt(snapshot.encode()))
+        path=Path(folder)/'model-service.json';ModelService(path)._write(config);return path
 
 class PostgresSessionStore:
     def __init__(self,database):self.database=database
@@ -110,6 +119,13 @@ class PostgresStore(Store):
     def __init__(self,database=None):
         self.database=database or Database();self.lock=threading.RLock();self.model_service=CloudModelService(self.database);self.path='postgres'
         with self.database.transaction(write=True) as db:db.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',('rules',encode(A_RULES)))
+    def for_user(self,username):
+        if not isinstance(username,str) or not username:raise ValueError('请先登录')
+        scoped=copy.copy(self);scoped.username=username
+        scoped.model_service=copy.copy(self.model_service);scoped.model_service.lock=threading.RLock()
+        scoped.model_service.setting_key='model-service:user:'+username
+        scoped.model_service.cipher=self.model_service.cipher
+        return scoped
     def connect(self):return self.database.transaction()
     def _write(self,method,*args,**kwargs):
         with self.database.transaction(write=True),self.lock:return method(self,*args,**kwargs)
@@ -137,7 +153,7 @@ class PostgresStore(Store):
         return self.job_state(row) if row else dict(IDLE)
     @staticmethod
     def job_state(row):
-        state=dict(row['state']);state.update(status=row['status'],running=row['status'] in ACTIVE,stopping=row['cancel_requested'],done=row['position'],scope=row['scope'],mode=row['mode'],id=row['id'])
+        state={key:value for key,value in row['state'].items() if not key.startswith('_')};state.update(status=row['status'],running=row['status'] in ACTIVE,stopping=row['cancel_requested'],done=row['position'],scope=row['scope'],mode=row['mode'],id=row['id'])
         return state
     def state(self,full=True):
         if full:
@@ -158,18 +174,19 @@ class PostgresStore(Store):
                     'history':[dict(row,offers=json.loads(row['offers'])) for row in db.execute('SELECT * FROM history ORDER BY id DESC LIMIT 30')],
                     'drafts':[dict(row) for row in db.execute('SELECT * FROM drafts ORDER BY id DESC')],'job':self.job,
                     'model_service':self.model_service.public(),'integrations':{'email':False,'feishu':False,'llm':self.model_service.public()['tested']},'version':'0.1.0'}
-        data.update(deployment='cloud',auth_enabled=True,limits={'file_bytes':3*1024*1024})
+        data.update(deployment='cloud',auth_enabled=True,username=getattr(self,'username',''),limits={'file_bytes':3*1024*1024})
         return data
     def start_job(self,mode,ids=None,scope='all',selection='remaining'):
         if mode not in ['real','demo'] or scope not in ['all','contacts'] or selection not in ['remaining','all']:raise ValueError('采集模式或范围无效')
-        if mode=='real' and not self.model_service.public()['configured']:raise ValueError('请先配置模型服务 API URL、模型名和密钥')
+        if mode=='real' and (not self.model_service.public()['configured'] or not self.model_service.public()['key_configured']):raise ValueError('请先为当前账号配置 API URL、模型名和 API Key')
         from cloud_scaling import enabled
         if os.environ.get('VERCEL') and not enabled():raise ValueError('云端浏览器启动凭据未就绪，请检查部署配置')
         with self.database.transaction(write=True) as db:
             if db.execute("SELECT id FROM cloud_jobs WHERE status IN ('queued','running','stopping')").fetchone():raise ValueError('已有云端批次运行，请停止或等待完成')
             rows=[row for row in Store.state(self)['suppliers'] if row['mode']==mode and ((ids and row['id'] in ids) or (not ids and (mode=='demo' or selection=='all' or scope=='contacts' and row['contact_status']!='found' or scope=='all' and row['status']=='pending')))]
             if not rows:raise ValueError('该范围没有待采集记录；可选择重新检查全部')
-            job_id=uuid.uuid4().hex;state=dict(IDLE,mode=mode,scope=scope,selection=selection,total=len(rows),stage='云端任务已排队，等待浏览器执行',current='等待云端浏览器')
+            snapshot=self.model_service.snapshot() if mode=='real' else ''
+            job_id=uuid.uuid4().hex;state=dict(IDLE,requested_by=getattr(self,'username',''),_model_config=snapshot,mode=mode,scope=scope,selection=selection,total=len(rows),stage='云端任务已排队，等待浏览器执行',current='等待云端浏览器')
             db.execute('INSERT INTO cloud_jobs(id,mode,scope,selection,supplier_ids,state) VALUES(?,?,?,?,?,?)',(job_id,mode,scope,selection,Jsonb([row['id'] for row in rows]),Jsonb(state)))
             self.event(('仅联系方式' if scope=='contacts' else '全量采集')+'云端批次已排队：'+str(len(rows))+' 家',mode=mode)
             from cloud_scaling import set_instances
@@ -177,6 +194,8 @@ class PostgresStore(Store):
         return self.job
     def stop_job(self):
         with self.database.transaction(write=True) as db:
+            active=db.execute("SELECT state FROM cloud_jobs WHERE status IN ('queued','running','stopping')").fetchone()
+            if active and getattr(self,'username',None) and active['state'].get('requested_by')!=self.username:raise ValueError('仅任务发起人可以停止此批次')
             db.execute("UPDATE cloud_jobs SET cancel_requested=true,status=CASE WHEN status='queued' THEN 'stopped' ELSE 'stopping' END,state=state||?,updated_at=now() WHERE status IN ('queued','running','stopping')",(Jsonb({'stage':'已请求停止云端浏览器，保留完成记录'}),))
         return self.job
     def claim_job(self,owner):

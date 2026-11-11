@@ -284,6 +284,8 @@ def make_draft(row,subject=None,body=None):
     return msg.as_bytes()
 
 class Handler(BaseHTTPRequestHandler):
+    @property
+    def store(self):return self.server.store
     def log_message(self,fmt,*args): pass
     def send(self,data,status=200,ctype='application/json; charset=utf-8',filename=None):
         raw=encode(data).encode() if ctype.startswith('application/json') else data if isinstance(data,bytes) else data.encode('utf-8')
@@ -294,7 +296,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get('Host','').split(':')[0] in ['127.0.0.1','localhost']
     def do_GET(self):
         if not self.check_host(): return self.send({'error':'仅允许本机访问'},403)
-        path=urlsplit(self.path).path; params=parse_qs(urlsplit(self.path).query); store=self.server.store
+        path=urlsplit(self.path).path; params=parse_qs(urlsplit(self.path).query); store=self.store
         try:
             if path=='/api/state': return self.send(store.state())
             if path=='/api/export-contacts':
@@ -339,7 +341,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length=int(self.headers.get('Content-Length','0'))
             if not 0<length<=8*1024*1024: raise ValueError('上传内容过大，请使用 5MB 以内的文件')
-            data=json.loads(self.rfile.read(length)); path=urlsplit(self.path).path; store=self.server.store
+            data=json.loads(self.rfile.read(length)); path=urlsplit(self.path).path; store=self.store
             if not isinstance(data,dict): raise ValueError('请求须为 JSON 对象')
             if path in ['/api/import','/api/import-preview']:
                 if 'file_base64' in data:

@@ -20,6 +20,11 @@ def context():
         return _CONTEXT
 
 class CloudBusinessHandler(Handler):
+    @property
+    def store(self):
+        username=self.auth_session['username']
+        if getattr(getattr(self,'_personal_store',None),'username',None)!=username:self._personal_store=self.server.store.for_user(username)
+        return self._personal_store
     def setup(self):
         self.server.store,self.server.auth=context()
         super().setup()
@@ -32,9 +37,9 @@ class CloudBusinessHandler(Handler):
     def do_GET(self):
         if not self.check_host():return self.send({'error':'访问地址不匹配'},403)
         path=urlsplit(self.path).path
-        if path=='/api/state':return self.send(self.server.store.state(full=False))
+        if path=='/api/state':return self.send(self.store.state(full=False))
         if path=='/api/supplier':
-            try:return self.send(self.server.store.get(int(parse_qs(urlsplit(self.path).query).get('id',['0'])[0])))
+            try:return self.send(self.store.get(int(parse_qs(urlsplit(self.path).query).get('id',['0'])[0])))
             except (ValueError,KeyError):return self.send({'error':'供应商不存在'},404)
         return super().do_GET()
     def do_POST(self):
