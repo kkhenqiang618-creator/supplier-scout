@@ -1,11 +1,15 @@
 """Vercel daemon: durable Postgres jobs, isolated Moli processes, fenced commits."""
+import os
 import signal
+import socket
 import tempfile
 import threading
 import time
 import uuid
 from psycopg.types.json import Jsonb
+from urllib.parse import urlsplit
 from cloud_store import PostgresStore, LostLease
+from model_service import ModelService, ModelConfigError, ModelTransientError, PHASE_TEXT, NETWORK_PHASES
 from server import collect_site, CollectionCancelled, AgentServiceError
 try:from server import ModelTransientSiteError
 except ImportError:
@@ -14,6 +18,56 @@ except ImportError:
 MODEL_FAILURE_LIMIT=3
 HEARTBEAT_INTERVAL=5
 HEARTBEAT_GRACE=35
+PROXY_VARS=['HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','https_proxy','http_proxy','all_proxy']
+PROBE_PADDING='这是一段用于检测云端网络上传能力的填充文本，请忽略。'*380  # json.dumps escapes CJK as \\uXXXX: ~59KB request body, the size of a real step-1 request.
+
+
+def probe_reason(error):
+    phase=getattr(error,'phase',None)
+    return PHASE_TEXT.get(phase) or str(error).replace('模型服务调用失败：','',1)[:160]
+
+
+def egress_report(path):
+    """Proxy variable names (never values) and DNS for the model host; hosts and public IPs only, no URL path/query or key."""
+    names=[name for name in PROXY_VARS if os.environ.get(name)]
+    host=urlsplit(ModelService(path).read().get('base_url','')).hostname or ''
+    if not host:dns='无结果'
+    else:
+        try:
+            infos=socket.getaddrinfo(host,443,type=socket.SOCK_STREAM)
+            families={}
+            for family,_,_,_,address in infos:families.setdefault('IPv6' if family==socket.AF_INET6 else 'IPv4',[]).append(address[0])
+            dns='；'.join(name+' '+'、'.join(dict.fromkeys(ips)) for name,ips in sorted(families.items())) or '无结果'
+        except Exception as error:dns='解析失败（'+type(error).__name__+'）'
+    return '云端自检：代理变量 '+('已设置 '+'、'.join(names) if names else '未设置')+'；'+(host or '未知主机')+' 解析为 '+dns
+
+
+def self_check(store,job,owner,log,stop=None):
+    """Prove this daemon process can reach the model before touching any supplier; returns None or (kind, message)."""
+    with tempfile.TemporaryDirectory(prefix='scout-selfcheck-') as folder:
+        try:path=store.model_service.materialize(folder,snapshot=job['state'].get('_model_config',''))
+        except LostLease:raise
+        except Exception as error:return 'config','云端后台无法读取本批次的模型配置：'+str(error)[:200]
+        try:log(egress_report(path))
+        except LostLease:raise
+        except Exception:pass
+        service=ModelService(path);instruction={'role':'user','content':'只回复 OK'}
+        for label,messages in [('小请求',[instruction]),('60KB 请求',[{'role':'system','content':PROBE_PADDING},instruction])]:
+            if stop is not None and stop.is_set():raise CollectionCancelled()
+            started=time.monotonic()
+            try:service.complete(messages,attempts=1);error=None
+            except (ModelConfigError,ModelTransientError) as caught:error=caught
+            except Exception as caught:error=ModelTransientError('模型服务调用失败：'+type(caught).__name__)
+            elapsed='%.1fs'%(time.monotonic()-started)
+            log('云端自检：'+label+(' 成功 ' if error is None else ' 失败（'+probe_reason(error)+'）')+elapsed)
+            if error is None:continue
+            if label=='小请求':
+                if isinstance(error,ModelConfigError):return 'config',str(error)[:400]
+                if getattr(error,'phase',None) in NETWORK_PHASES:return 'egress','云端后台无法连接模型服务：'+probe_reason(error)+'；批次未开始，已保存自检结果'
+                log('云端自检：已连通模型服务，但模型暂时未正常回复，批次继续，由逐站失败计数决定是否停止');break  # HTTP 429/5xx or slow reply: the network path works.
+            if getattr(error,'phase',None) in NETWORK_PHASES:return 'egress','云端后台无法上传较大的请求（疑似网络 MTU 问题）：'+probe_reason(error)+'；批次未开始，已保存自检结果'
+            log('云端自检：60KB 请求 上传成功，模型返回异常，已忽略')  # Any HTTP reply or reply-wait timeout proves the upload got through.
+    return None
 
 
 def execute_job(store,job,owner,shutdown):
@@ -30,7 +84,22 @@ def execute_job(store,job,owner,shutdown):
                 if time.monotonic()-last_ok>=HEARTBEAT_GRACE:lost.set();stop.set();return
     heartbeat=threading.Thread(target=renew,daemon=True);heartbeat.start()
     model_failures=0
+    def job_log(message):
+        if stop.is_set():return
+        try:store.progress(job['id'],owner,message,'')
+        except LostLease:raise
+        except Exception:pass
+        try:store.event(message,mode=job['mode'])
+        except Exception:pass  # Events are best-effort; the scoped store keeps them in the owner's log.
     try:
+        if job['mode']!='demo':
+            with store.fenced(job['id'],owner) as (db,current):
+                if current['cancel_requested'] or shutdown.is_set():raise CollectionCancelled()
+            failure=self_check(store,job,owner,job_log,stop)
+            with store.fenced(job['id'],owner) as (db,current):
+                if current['cancel_requested'] or stop.is_set():raise CollectionCancelled()
+            if failure:
+                store.finish_job(job['id'],owner,'failed',failure[1]);return
         for index in range(job['position'],len(job['supplier_ids'])):
             with store.fenced(job['id'],owner) as (db,current):
                 if current['cancel_requested'] or shutdown.is_set():raise CollectionCancelled()

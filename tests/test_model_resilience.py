@@ -38,7 +38,7 @@ class ModelRetryTests(unittest.TestCase):
             with self.assertRaises(ModelConfigError):self.service.complete([])
         with patch('urllib.request.OpenerDirector.open',side_effect=urllib.error.URLError('reset')) as opened,patch('model_service.time.sleep'):
             with self.assertRaises(ModelTransientError):self.service.complete([])
-        self.assertEqual(opened.call_count,3)
+        self.assertEqual(opened.call_count,2)  # Connect-phase failures (model never saw the request) are retried once only.
     def test_empty_body_retried_once_then_config_error(self):
         with patch('urllib.request.OpenerDirector.open',side_effect=lambda *a,**k:reply('')) as opened,patch('model_service.time.sleep'):
             with self.assertRaisesRegex(ModelConfigError,'空正文'):self.service.complete([])
