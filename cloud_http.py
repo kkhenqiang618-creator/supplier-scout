@@ -37,6 +37,20 @@ class CloudBusinessHandler(Handler):
     def do_GET(self):
         if not self.check_host():return self.send({'error':'访问地址不匹配'},403)
         path=urlsplit(self.path).path
+        if path.startswith('/api/admin/'):
+            if not self.store.is_admin:return self.send({'error':'仅超级管理员可访问'},403)
+            names=list(self.server.auth._verifiers)
+            if path=='/api/admin/overview':return self.send(self.store.team_overview(names))
+            query=parse_qs(urlsplit(self.path).query);username=query.get('username',[''])[0]
+            if username not in names:return self.send({'error':'成员不存在'},404)
+            member=self.server.store.for_user(username)
+            if path=='/api/admin/member':
+                data=member.state(full=False);data.pop('model_service',None);data.pop('integrations',None);data.update(read_only=True,is_admin=False)
+                return self.send(data)
+            if path=='/api/admin/supplier':
+                try:return self.send(member.get(int(query.get('id',['0'])[0])))
+                except (ValueError,KeyError):return self.send({'error':'供应商不存在'},404)
+            return self.send({'error':'路径不存在'},404)
         if path=='/api/state':return self.send(self.store.state(full=False))
         if path=='/api/supplier':
             try:return self.send(self.store.get(int(parse_qs(urlsplit(self.path).query).get('id',['0'])[0])))

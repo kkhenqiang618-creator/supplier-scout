@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet
 from cloud_store import CloudModelService,PostgresStore
 
 class SettingsDB:
+    def for_user(self,username):return self
     def __init__(self):
         self.conn=sqlite3.connect(':memory:',check_same_thread=False);self.conn.row_factory=sqlite3.Row
         self.conn.execute('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)');self.lock=threading.RLock()

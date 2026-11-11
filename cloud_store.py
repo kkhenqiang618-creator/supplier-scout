@@ -51,7 +51,10 @@ class SQL:
         return Cursor(cursor,last)
 
 class Database:
-    def __init__(self,url=None):self.url=url or os.environ['DATABASE_URL'];self.local=threading.local()
+    def __init__(self,url=None,username=None):self.url=url or os.environ['DATABASE_URL'];self.username=username;self.local=threading.local()
+    def for_user(self,username):
+        if not isinstance(username,str) or not username:raise ValueError('请先登录')
+        return Database(self.url,username=username)
     @contextlib.contextmanager
     def transaction(self,write=False):
         existing=getattr(self.local,'sql',None)
@@ -62,6 +65,7 @@ class Database:
         sql=SQL(connection);self.local.sql=sql
         try:
             connection.execute('SET LOCAL search_path TO scout_private, pg_catalog')
+            connection.execute("SELECT set_config('scout.username',%s,true),set_config('scout.system',%s,true)",(self.username or '', 'on' if self.username is None else 'off'))
             connection.execute("SET LOCAL statement_timeout TO '20s'")
             if write:connection.execute('SELECT pg_advisory_xact_lock(%s)',(WRITE_LOCK,))
             yield sql;connection.commit()
@@ -121,11 +125,17 @@ class PostgresStore(Store):
         with self.database.transaction(write=True) as db:db.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',('rules',encode(A_RULES)))
     def for_user(self,username):
         if not isinstance(username,str) or not username:raise ValueError('请先登录')
-        scoped=copy.copy(self);scoped.username=username
+        scoped=copy.copy(self);scoped.username=username;scoped.database=self.database.for_user(username)
+        scoped.is_admin=username==os.environ.get('SCOUT_ADMIN_USERNAME','')
         scoped.model_service=copy.copy(self.model_service);scoped.model_service.lock=threading.RLock()
+        scoped.model_service.database=scoped.database
         scoped.model_service.setting_key='model-service:user:'+username
         scoped.model_service.cipher=self.model_service.cipher
         return scoped
+    def rules(self):
+        key='rules:user:'+self.username if getattr(self,'username',None) else 'rules'
+        with self.connect() as db:row=db.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
+        return json.loads(row['value']) if row else copy.deepcopy(A_RULES)
     def connect(self):return self.database.transaction()
     def _write(self,method,*args,**kwargs):
         with self.database.transaction(write=True),self.lock:return method(self,*args,**kwargs)
@@ -146,7 +156,12 @@ class PostgresStore(Store):
             return Store.save_result(self,sid,dict(result,contacts=contacts,sources=sources))
     def save_contacts(self,*args,**kwargs):return self._write(Store.save_contacts,*args,**kwargs)
     def review(self,*args,**kwargs):return self._write(Store.review,*args,**kwargs)
-    def update_rules(self,*args,**kwargs):return self._write(Store.update_rules,*args,**kwargs)
+    def update_rules(self,rules):
+        from engine import validate_rules
+        validate_rules(rules)
+        key='rules:user:'+self.username if getattr(self,'username',None) else 'rules'
+        with self.database.transaction(write=True) as db:db.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,encode(rules)))
+        self.event('已更新个人报价规则；历史判断保留，重新采集后应用')
     @property
     def job(self):
         with self.connect() as db:row=db.execute('SELECT * FROM cloud_jobs ORDER BY created_at DESC LIMIT 1').fetchone()
@@ -174,9 +189,25 @@ class PostgresStore(Store):
                     'history':[dict(row,offers=json.loads(row['offers'])) for row in db.execute('SELECT * FROM history ORDER BY id DESC LIMIT 30')],
                     'drafts':[dict(row) for row in db.execute('SELECT * FROM drafts ORDER BY id DESC')],'job':self.job,
                     'model_service':self.model_service.public(),'integrations':{'email':False,'feishu':False,'llm':self.model_service.public()['tested']},'version':'0.1.0'}
-        data.update(deployment='cloud',auth_enabled=True,username=getattr(self,'username',''),limits={'file_bytes':3*1024*1024})
+        data.update(deployment='cloud',auth_enabled=True,username=getattr(self,'username',''),is_admin=getattr(self,'is_admin',False),limits={'file_bytes':3*1024*1024})
         return data
+    def team_overview(self,names):
+        if not getattr(self,'is_admin',False):raise PermissionError('仅超级管理员可查看成员汇总')
+        result={name:{'username':name,'suppliers':0,'contacts_found':0,'qualified':0,'drafts':0,'jobs':[]} for name in names}
+        with Database(self.database.url).transaction() as db:
+            for row in db.execute("SELECT owner,count(*) AS suppliers,count(*) FILTER(WHERE contact_status='found') AS contacts_found,count(*) FILTER(WHERE status='qualified') AS qualified FROM suppliers WHERE mode='real' GROUP BY owner"):
+                if row['owner'] in result:result[row['owner']].update({key:row[key] for key in ['suppliers','contacts_found','qualified']})
+            for row in db.execute('SELECT owner,count(*) AS drafts FROM drafts GROUP BY owner'):
+                if row['owner'] in result:result[row['owner']]['drafts']=row['drafts']
+            for row in db.execute('SELECT * FROM cloud_jobs ORDER BY created_at DESC LIMIT 200'):
+                if row['owner'] in result:
+                    job=self.job_state(row);job.update(created_at=str(row['created_at']),updated_at=str(row['updated_at']))
+                    result[row['owner']]['jobs'].append(job)
+        return {'members':list(result.values())}
     def start_job(self,mode,ids=None,scope='all',selection='remaining'):
+        try:return self._start_job(mode,ids,scope,selection)
+        except psycopg.errors.UniqueViolation:raise ValueError('云端浏览器正在执行任务，请稍后重试') from None
+    def _start_job(self,mode,ids=None,scope='all',selection='remaining'):
         if mode not in ['real','demo'] or scope not in ['all','contacts'] or selection not in ['remaining','all']:raise ValueError('采集模式或范围无效')
         if mode=='real' and (not self.model_service.public()['configured'] or not self.model_service.public()['key_configured']):raise ValueError('请先为当前账号配置 API URL、模型名和 API Key')
         from cloud_scaling import enabled

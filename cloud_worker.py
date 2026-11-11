@@ -77,7 +77,7 @@ def main():
             owner=uuid.uuid4().hex
             job=store.claim_job(owner)
             if job:
-                execute_job(store,job,owner,shutdown);idle_since=time.monotonic()
+                execute_job(store.for_user(job['owner']) if job.get('owner') else store,job,owner,shutdown);idle_since=time.monotonic()
             else:
                 from cloud_scaling import stop_if_idle
                 if time.monotonic()-idle_since>=60 and stop_if_idle(store):break
