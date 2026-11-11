@@ -87,7 +87,9 @@ class ReadTimeoutTests(unittest.TestCase):
         source = (ROOT / 'agent_browser.cjs').read_text(encoding='utf-8')
         self.assertLess(int(source.split('COMMAND_BUDGET=')[1].split(',')[0]) / 1000, browser_agent.COMMAND_TIMEOUT)
         for guard in ['该操作超出只读采集范围', '仅允许填写站内搜索框', '只记录该联系链接，不启动外部应用', "browser.contexts()[0]||await browser.newContext()"]: self.assertIn(guard, source)
-        self.assertNotIn('proxy', source.lower())
+        # The only proxy is the Chrome fallback's loopback GuardProxy; the Moli (cdp) path has none and nothing page-controlled picks the server.
+        self.assertEqual(source.count('proxy:{'), 1); self.assertIn("proxy:{server:'http://127.0.0.1:'+target}", source)
+        self.assertIn("delete process.env.PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK", source)
 
 class RenderWeakTests(unittest.TestCase):
     def run_site(self, snapshots, answers):

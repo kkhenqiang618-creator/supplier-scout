@@ -1,6 +1,7 @@
 {
- "generated": "2026-11-11 16:33:47",
+ "generated": "2026-11-11 23:18:01",
  "moli": "runtime/moli",
+ "chrome": "chromium-headless-shell (Playwright default or SCOUT_CHROME_BIN)",
  "expected_qr_payload": [
   "https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD"
  ],
@@ -9,8 +10,8 @@
   {
    "check": "footer_contacts.open",
    "pass": true,
-   "detail": "http://127.0.0.1:56393/footer_contacts.html",
-   "seconds": 1.44
+   "detail": "http://127.0.0.1:62933/footer_contacts.html",
+   "seconds": 0.84
   },
   {
    "check": "footer_contacts.text_length",
@@ -45,8 +46,8 @@
   {
    "check": "modal_vue.open",
    "pass": true,
-   "detail": "http://127.0.0.1:56393/modal_vue.html",
-   "seconds": 3.21
+   "detail": "http://127.0.0.1:62933/modal_vue.html",
+   "seconds": 3.15
   },
   {
    "check": "modal_vue.text_length",
@@ -77,13 +78,13 @@
    "check": "modal_vue.qr_decoded",
    "pass": true,
    "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
-   "seconds": 0.13
+   "seconds": 0.14
   },
   {
    "check": "modal_aria.open",
    "pass": true,
-   "detail": "http://127.0.0.1:56393/modal_aria.html",
-   "seconds": 3.12
+   "detail": "http://127.0.0.1:62933/modal_aria.html",
+   "seconds": 3.14
   },
   {
    "check": "modal_aria.text_length",
@@ -103,7 +104,7 @@
   {
    "check": "qr_canvas.open",
    "pass": true,
-   "detail": "http://127.0.0.1:56393/qr_canvas.html",
+   "detail": "http://127.0.0.1:62933/qr_canvas.html",
    "seconds": 3.14
   },
   {
@@ -125,13 +126,13 @@
    "check": "qr_canvas.qr_decoded",
    "pass": true,
    "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
-   "seconds": 0.31
+   "seconds": 0.27
   },
   {
    "check": "qr_background.open",
    "pass": true,
-   "detail": "http://127.0.0.1:56393/qr_background.html",
-   "seconds": 3.11
+   "detail": "http://127.0.0.1:62933/qr_background.html",
+   "seconds": 3.14
   },
   {
    "check": "qr_background.text_length",
@@ -152,12 +153,12 @@
    "check": "qr_background.qr_decoded",
    "pass": true,
    "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
-   "seconds": 0.12
+   "seconds": 0.13
   },
   {
    "check": "qr_datauri.open",
    "pass": true,
-   "detail": "http://127.0.0.1:56393/qr_datauri.html",
+   "detail": "http://127.0.0.1:62933/qr_datauri.html",
    "seconds": 3.13
   },
   {
@@ -179,12 +180,12 @@
    "check": "qr_datauri.qr_decoded",
    "pass": true,
    "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
-   "seconds": 0.13
+   "seconds": 0.12
   },
   {
    "check": "spa_slow.open",
    "pass": true,
-   "detail": "http://127.0.0.1:56393/spa_slow.html",
+   "detail": "http://127.0.0.1:62933/spa_slow.html",
    "seconds": 4.3
   },
   {
@@ -211,8 +212,8 @@
   {
    "check": "empty.open",
    "pass": true,
-   "detail": "http://127.0.0.1:56393/empty.html",
-   "seconds": 3.15
+   "detail": "http://127.0.0.1:62933/empty.html",
+   "seconds": 3.14
   },
   {
    "check": "empty.text_length",
@@ -232,8 +233,8 @@
   {
    "check": "modal_body_class.open",
    "pass": true,
-   "detail": "http://127.0.0.1:56393/modal_body_class.html",
-   "seconds": 0.73
+   "detail": "http://127.0.0.1:62933/modal_body_class.html",
+   "seconds": 0.72
   },
   {
    "check": "modal_body_class.text_length",
@@ -256,10 +257,27 @@
    "detail": "1"
   },
   {
+   "check": "splash_anim.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/splash_anim.html",
+   "seconds": 3.14
+  },
+  {
+   "check": "splash_anim.render_weak_flagged",
+   "pass": true,
+   "detail": "10"
+  },
+  {
+   "check": "splash_anim.still_weak_after_wait",
+   "pass": true,
+   "detail": "10",
+   "seconds": 4.24
+  },
+  {
    "check": "hang.open",
    "pass": true,
    "detail": "c0",
-   "seconds": 3.35
+   "seconds": 3.16
   },
   {
    "check": "hang.click_returns_within_15s",
@@ -282,7 +300,7 @@
    "check": "hang.snapshot_returns_within_15s",
    "pass": true,
    "detail": "ok",
-   "seconds": 3.15
+   "seconds": 3.16
   },
   {
    "check": "hang.close_within_10s",
@@ -294,7 +312,367 @@
    "check": "stall.read_timeout_raises",
    "pass": true,
    "detail": "浏览器无响应",
-   "seconds": 3.01
+   "seconds": 3.02
+  },
+  {
+   "check": "chrome:footer_contacts.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/footer_contacts.html",
+   "seconds": 0.71
+  },
+  {
+   "check": "chrome:footer_contacts.text_length",
+   "pass": true,
+   "detail": "179"
+  },
+  {
+   "check": "chrome:footer_contacts.not_render_weak",
+   "pass": true,
+   "detail": "None"
+  },
+  {
+   "check": "chrome:footer_contacts.control_role",
+   "pass": true,
+   "detail": "['link', 'link', 'link']"
+  },
+  {
+   "check": "chrome:footer_contacts.observed:sales@xinghe-fixture.com",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:footer_contacts.observed:735812946",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:footer_contacts.observed:https://t.me/xinghe_fixture_sales",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:modal_vue.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/modal_vue.html",
+   "seconds": 3.12
+  },
+  {
+   "check": "chrome:modal_vue.text_length",
+   "pass": true,
+   "detail": "98"
+  },
+  {
+   "check": "chrome:modal_vue.dialog_deduped",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "chrome:modal_vue.observed:yunchuan_biz2026",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:modal_vue.dialog_captured",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "chrome:modal_vue.image_count",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "chrome:modal_vue.qr_decoded",
+   "pass": true,
+   "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
+   "seconds": 0.17
+  },
+  {
+   "check": "chrome:modal_aria.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/modal_aria.html",
+   "seconds": 3.1
+  },
+  {
+   "check": "chrome:modal_aria.text_length",
+   "pass": true,
+   "detail": "114"
+  },
+  {
+   "check": "chrome:modal_aria.observed:partner@neon-fixture.cn",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:modal_aria.dialog_captured",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "chrome:qr_canvas.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/qr_canvas.html",
+   "seconds": 3.11
+  },
+  {
+   "check": "chrome:qr_canvas.text_length",
+   "pass": true,
+   "detail": "51"
+  },
+  {
+   "check": "chrome:qr_canvas.observed:扫码联系客服",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:qr_canvas.image_count",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "chrome:qr_canvas.qr_decoded",
+   "pass": true,
+   "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
+   "seconds": 0.18
+  },
+  {
+   "check": "chrome:qr_background.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/qr_background.html",
+   "seconds": 3.09
+  },
+  {
+   "check": "chrome:qr_background.text_length",
+   "pass": true,
+   "detail": "45"
+  },
+  {
+   "check": "chrome:qr_background.observed:扫码添加商务微信",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:qr_background.image_count",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "chrome:qr_background.qr_decoded",
+   "pass": true,
+   "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
+   "seconds": 0.12
+  },
+  {
+   "check": "chrome:qr_datauri.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/qr_datauri.html",
+   "seconds": 3.09
+  },
+  {
+   "check": "chrome:qr_datauri.text_length",
+   "pass": true,
+   "detail": "47"
+  },
+  {
+   "check": "chrome:qr_datauri.observed:扫码联系商务客服",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:qr_datauri.image_count",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "chrome:qr_datauri.qr_decoded",
+   "pass": true,
+   "detail": "['https://example.com/contact?source=qr&text=%E4%BD%A0%E5%A5%BD']",
+   "seconds": 0.13
+  },
+  {
+   "check": "chrome:spa_slow.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/spa_slow.html",
+   "seconds": 4.29
+  },
+  {
+   "check": "chrome:spa_slow.text_length",
+   "pass": true,
+   "detail": "65"
+  },
+  {
+   "check": "chrome:spa_slow.observed:jiguang_sales88",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:spa_slow.observed:biz@jiguang-fixture.com",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:spa_slow.after_wait_observed",
+   "pass": true,
+   "detail": "",
+   "seconds": 4.22
+  },
+  {
+   "check": "chrome:empty.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/empty.html",
+   "seconds": 3.09
+  },
+  {
+   "check": "chrome:empty.text_length",
+   "pass": true,
+   "detail": "20"
+  },
+  {
+   "check": "chrome:empty.render_weak_flagged",
+   "pass": true,
+   "detail": "True"
+  },
+  {
+   "check": "chrome:empty.observed:本站页面暂无任何内容",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:modal_body_class.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/modal_body_class.html",
+   "seconds": 0.68
+  },
+  {
+   "check": "chrome:modal_body_class.text_length",
+   "pass": true,
+   "detail": "12030"
+  },
+  {
+   "check": "chrome:modal_body_class.body_not_dialog",
+   "pass": true,
+   "detail": "['商务微信：biz_wx_777']"
+  },
+  {
+   "check": "chrome:modal_body_class.observed:biz_wx_777",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:modal_body_class.dialog_captured",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "chrome:splash_anim.open",
+   "pass": true,
+   "detail": "http://127.0.0.1:62933/splash_anim.html",
+   "seconds": 0.68
+  },
+  {
+   "check": "chrome:splash_anim.text_length",
+   "pass": true,
+   "detail": "172"
+  },
+  {
+   "check": "chrome:splash_anim.not_render_weak",
+   "pass": true,
+   "detail": "None"
+  },
+  {
+   "check": "chrome:splash_anim.observed:bizdev@qiming-fixture.com",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:splash_anim.observed:qiming_biz_2026",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:splash_anim.observed:https://t.me/qiming_fixture_biz",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "check": "chrome:proxy.loopback_via_proxy",
+   "pass": true,
+   "detail": "['http://127.0.0.1:62933/footer_contacts.html', 'http://127.0.0.1:62933/modal_vue.html']"
+  },
+  {
+   "check": "chrome:proxy.metadata",
+   "pass": true,
+   "detail": "禁止访问内网、回环或保留地址",
+   "seconds": 3.16
+  },
+  {
+   "check": "chrome:proxy.private_dns",
+   "pass": true,
+   "detail": "禁止访问内网、回环或保留地址",
+   "seconds": 3.13
+  },
+  {
+   "check": "chrome:proxy.ipv4_mapped",
+   "pass": true,
+   "detail": "禁止访问内网、回环或保留地址",
+   "seconds": 3.15
+  },
+  {
+   "check": "chrome:proxy.rebind_pinned",
+   "pass": true,
+   "detail": "首页 价格 星河API 稳定的大模型中转服务 支持 GPT、Claude、DeepSeek 等主流模型，按量计费，充值即",
+   "seconds": 0.74
+  },
+  {
+   "check": "chrome:proxy.denials_logged",
+   "pass": true,
+   "detail": "['http://169.254.169.254/latest/meta-data/', 'http://private.fixture-test/footer_conta', 'http://[::ffff:a00:1]/']"
+  },
+  {
+   "check": "chrome:proxy.rebind_resolved_once",
+   "pass": true,
+   "detail": "1"
+  },
+  {
+   "check": "chrome:hang.open",
+   "pass": true,
+   "detail": "c0",
+   "seconds": 3.1
+  },
+  {
+   "check": "chrome:hang.click_returns_within_15s",
+   "pass": true,
+   "detail": "ok",
+   "seconds": 3.5
+  },
+  {
+   "check": "chrome:hang.click_returns_within_5s",
+   "pass": true,
+   "detail": "ok",
+   "seconds": 3.5
+  },
+  {
+   "check": "chrome:hang.click_flagged_unresponsive",
+   "pass": true,
+   "detail": "页面脚本无响应"
+  },
+  {
+   "check": "chrome:hang.snapshot_returns_within_15s",
+   "pass": true,
+   "detail": "ok",
+   "seconds": 3.15
+  },
+  {
+   "check": "chrome:hang.close_within_10s",
+   "pass": true,
+   "detail": "",
+   "seconds": 0.14
+  },
+  {
+   "check": "chrome:stall.read_timeout_raises",
+   "pass": true,
+   "detail": "浏览器无响应",
+   "seconds": 3.02
   }
  ]
 }

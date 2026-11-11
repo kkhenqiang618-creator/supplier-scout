@@ -49,11 +49,11 @@ def collect_site(url,log,stop_event,scope="all",model_path=None,rules=None):
             for line in process.stdout: messages.put(line)
         finally: messages.put(None)
     threading.Thread(target=read_output,daemon=True).start()
-    deadline=time.monotonic()+600
+    deadline=time.monotonic()+840
     try:
         while True:
             if stop_event.is_set(): raise CollectionCancelled()
-            if time.monotonic()>deadline: raise ValueError('单站 Agent 超过 10 分钟，已停止；可稍后单独继续')
+            if time.monotonic()>deadline: raise ValueError('单站 Agent 超过 14 分钟，已停止；可稍后单独继续')
             try: line=messages.get(timeout=.1)
             except queue.Empty: continue
             if line is None: raise ValueError('采集进程意外结束，请查看该网站后重试')

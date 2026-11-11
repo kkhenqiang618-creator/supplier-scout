@@ -7,9 +7,27 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function bounded(promise,ms,message){let timer;promise.catch(()=>{});return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Object.assign(Error(message),{bounded:true})),Math.max(200,ms))})]).finally(()=>clearTimeout(timer))}
 // Moli does not paint drawImage onto canvas, so remember what each canvas drew; decode_qr downloads it through the safe Python path.
 const RECORD_CANVAS_SOURCES=()=>{try{const proto=window.CanvasRenderingContext2D&&CanvasRenderingContext2D.prototype;if(!proto)return;const draw=proto.drawImage;proto.drawImage=function(source,...rest){try{const src=source&&(source.currentSrc||source.src);if(typeof src==='string'&&/^(https?:|data:)/i.test(src)&&src.length<4500000&&this.canvas){const list=JSON.parse(this.canvas.getAttribute('data-scout-draw')||'[]');if(!list.includes(src)&&list.length<4){list.push(src);this.canvas.setAttribute('data-scout-draw',JSON.stringify(list))}}}catch(e){}return draw.call(this,source,...rest)}}catch(e){}};
+// Chrome fallback only: no WebRTC, so a page cannot reach hosts over UDP around the proxy.
+const NO_WEBRTC=()=>{for(const name of ['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel','RTCIceCandidate','RTCSessionDescription'])try{delete window[name];Object.defineProperty(window,name,{value:undefined,configurable:false,writable:false})}catch(e){}};
+// The Python GuardProxy is the SSRF filter; these flags only stop Chrome from resolving or sending anything outside it.
+// No --disable-features here: Chrome honours only the last one, which would drop Playwright's own list (HttpsUpgrades, AvoidCorsURLLoaderRestartOnRedirect, ...).
+const CHROME_ARGS=['--disable-dev-shm-usage','--disable-gpu','--disable-extensions','--mute-audio','--no-first-run','--renderer-process-limit=2','--js-flags=--max-old-space-size=256','--disable-site-isolation-trials','--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--disable-quic','--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--webrtc-ip-handling-policy=disable_non_proxied_udp','--disable-background-networking','--disable-component-update','--dns-prefetch-disable','--no-pings'];
+async function start(mode,target){
+ if(mode==='cdp'){const browser=await chromium.connectOverCDP(target);return {browser,context:browser.contexts()[0]||await browser.newContext()}}
+ if(mode!=='launch'||!/^\d+$/.test(target||''))throw Error('浏览器启动参数无效');
+ // Playwright adds --proxy-bypass-list=<-loopback>, so loopback also goes through the proxy unless this override is set; never honour it.
+ delete process.env.PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK;
+ const browser=await chromium.launch({headless:true,executablePath:process.env.SCOUT_CHROME_BIN||undefined,proxy:{server:'http://127.0.0.1:'+target},args:CHROME_ARGS,timeout:20000});
+ const context=await browser.newContext({serviceWorkers:'block',acceptDownloads:false,viewport:{width:1280,height:900}});
+ await context.addInitScript(NO_WEBRTC);
+ await context.route('**/*',route=>{const request=route.request();let protocol='';try{protocol=new URL(request.url()).protocol}catch(e){}
+  if(!['http:','https:','data:','blob:'].includes(protocol)||['font','media'].includes(request.resourceType()))return route.abort('blockedbyclient').catch(()=>{});return route.continue().catch(()=>{})});
+ return {browser,context};
+}
 (async()=>{
- const browser=await chromium.connectOverCDP(process.argv[2]);
- const context=browser.contexts()[0]||await browser.newContext();
+ const {browser,context}=await start(process.argv[2],process.argv[3]);
+ // Moli serve or the Chrome main process died (OOM, crash): say so and exit, so Python raises BrowserDeadError instead of burning model steps.
+ let closing=false;browser.on('disconnected',()=>{if(closing)return;console.log(JSON.stringify({ok:false,dead:true,error:'浏览器进程已退出'}));process.exit(1)});
  await context.addInitScript(RECORD_CANVAS_SOURCES).catch(()=>{});
  let page=context.pages()[0];
  if(!page||page.isClosed()||!await bounded(page.evaluate(()=>1),3000,'页面无响应').then(()=>true,()=>false))page=await context.newPage();
@@ -52,6 +70,7 @@ const RECORD_CANVAS_SOURCES=()=>{try{const proto=window.CanvasRenderingContext2D
   }
  }
  const element=(attribute,ref)=>page.locator('['+attribute+'="'+ref+'"]');
+ console.log(JSON.stringify({ok:true,ready:true}));
  for await(const line of readline.createInterface({input:process.stdin,crlfDelay:Infinity})){
   const deadline=Date.now()+COMMAND_BUDGET;const left=(limit=EVAL_LIMIT)=>Math.min(limit,deadline-Date.now());
   try{
@@ -106,5 +125,5 @@ const RECORD_CANVAS_SOURCES=()=>{try{const proto=window.CanvasRenderingContext2D
    console.log(JSON.stringify({ok:true,snapshot:current}));
   }catch(e){console.log(JSON.stringify({ok:false,error:String(e.message).slice(0,600)}))}
  }
- await browser.close();
+ closing=true;await browser.close();
 })().catch(error=>{console.log(JSON.stringify({ok:false,error:error.message}));process.exitCode=1});

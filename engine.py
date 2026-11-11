@@ -106,6 +106,20 @@ def extract_page(html,source):
             offers.append({'model':found[0],'ratio':float(discounts[0])/10,'basis':'published_discount','evidence':line[:600],'source':source})
     return {'text':text[:80000],'contacts':contacts,'offers':offers,'links':parser.links,'source':source}
 
+NAT64=[ipaddress.ip_network('64:ff9b::/96'),ipaddress.ip_network('64:ff9b:1::/48')]
+# IPv4-compatible (::a.b.c.d, deprecated) and SIIT-translated (::ffff:0:a.b.c.d) forms also embed an IPv4 address that is_global ignores.
+EMBEDDED=[ipaddress.ip_network('::/96'),ipaddress.ip_network('::ffff:0:0:0/96')]
+def is_public_ip(address):
+    """is_global misses addresses that tunnel to a private IPv4 (6to4 2002:a00:1::, NAT64 64:ff9b::a00:1); unwrap or refuse those first."""
+    try: ip=ipaddress.ip_address(str(address).split('%',1)[0])
+    except ValueError: return False
+    if ip.version==6:
+        if ip.ipv4_mapped: ip=ip.ipv4_mapped
+        elif ip.sixtofour: ip=ip.sixtofour
+        elif any(ip in net for net in NAT64+EMBEDDED): return False
+    # is_global still admits multicast (224/4, ff00::/8) and deprecated site-local fec0::/10.
+    return ip.is_global and not ip.is_multicast and not getattr(ip,'is_site_local',False)
+
 def validate_url(url):
     parsed=urllib.parse.urlsplit(url)
     if parsed.scheme not in ['http','https'] or not parsed.hostname or parsed.username or parsed.password: raise ValueError('只允许无账号密码的公开 HTTP/HTTPS 地址')
@@ -113,7 +127,7 @@ def validate_url(url):
     if parsed.hostname.lower()=='localhost' or parsed.hostname.endswith(('.local','.internal','.example')): raise ValueError('该域名不是公开网站')
     try: addresses=socket.getaddrinfo(parsed.hostname,parsed.port or (443 if parsed.scheme=='https' else 80),type=socket.SOCK_STREAM)
     except socket.gaierror: raise ValueError('域名无法解析')
-    if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses): raise ValueError('禁止访问内网、回环或保留地址')
+    if not addresses or any(not is_public_ip(row[4][0]) for row in addresses): raise ValueError('禁止访问内网、回环或保留地址')
     return url
 
 class SafeRedirect(urllib.request.HTTPRedirectHandler):

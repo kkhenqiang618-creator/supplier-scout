@@ -20,7 +20,7 @@ import urllib.request
 import urllib.robotparser
 from pathlib import Path
 from model_service import ModelService,ModelConfigError,ModelTransientError
-from engine import validate_url
+from engine import validate_url,is_public_ip
 
 ROOT=Path(__file__).resolve().parent
 CONTACT_TYPES={'email','phone','wechat','qq','qq_group','wechat_link','official_account','telegram','discord','contact_form','online_service','qrcode','other'}
@@ -144,7 +144,10 @@ def runtime_paths():
 
 # Test-only (tests/browser_regression.py): Moli 1.1.23 has no allowlist, so loopback fixtures run with every non-loopback private/reserved range blocked instead of --block-private-networks.
 LOOPBACK_TEST_BLOCK_CIDRS='0.0.0.0/8,10.0.0.0/8,100.64.0.0/10,169.254.0.0/16,172.16.0.0/12,192.0.0.0/24,192.168.0.0/16,198.18.0.0/15,224.0.0.0/4,240.0.0.0/4,::/128,fc00::/7,fe80::/10,ff00::/8'
+READY_TIMEOUT=20
+BROWSER_CLOSED='Target page, context or browser has been closed'
 class Browser:
+    label='Moli'
     def __init__(self,folder,*,allow_loopback_for_tests=False):
         binary,module=runtime_paths();network=['--block-cidrs',LOOPBACK_TEST_BLOCK_CIDRS] if allow_loopback_for_tests is True else ['--block-private-networks'];sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
         self.folder=Path(folder);self.stderr=(self.folder/'browser.log').open('w');self.worker=None;self.server=None
@@ -158,9 +161,17 @@ class Browser:
                 except Exception:
                     if time.monotonic()>deadline or self.server.poll() is not None:raise ValueError('Moli 浏览器启动失败')
                     time.sleep(.1)
-            self.worker=subprocess.Popen(['node',str(ROOT/'agent_browser.cjs'),endpoint],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.stderr,text=True,encoding='utf-8',env=dict(os.environ,SCOUT_PLAYWRIGHT_MODULE=module),bufsize=1)
-            self.replies=queue.Queue();threading.Thread(target=self._read,args=(self.worker.stdout,self.replies),daemon=True).start()
+            self._spawn(module,['cdp',endpoint])
         except Exception:self.close();raise
+    def _spawn(self,module,argv):
+        """Start the shared Node worker (agent_browser.cjs) and wait for its ready line, so a launch failure surfaces here, not on the first command."""
+        self.worker=subprocess.Popen(['node',str(ROOT/'agent_browser.cjs'),*argv],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.stderr,text=True,encoding='utf-8',env=dict(os.environ,SCOUT_PLAYWRIGHT_MODULE=module),bufsize=1)
+        self.replies=queue.Queue();threading.Thread(target=self._read,args=(self.worker.stdout,self.replies),daemon=True).start()
+        try:line=self.replies.get(timeout=READY_TIMEOUT)
+        except queue.Empty:line=''
+        try:ready=json.loads(line) if line else {}
+        except ValueError:ready={}
+        if not ready.get('ready'):raise ValueError(self.label+' 浏览器启动失败'+('：'+str(ready.get('error'))[:200] if ready.get('error') else ''))
     @staticmethod
     def _read(stream,replies):
         try:
@@ -179,20 +190,60 @@ class Browser:
         if not line:raise BrowserDeadError('浏览器连接中断')
         if len(line)>REPLY_MAX:raise ValueError('浏览器返回数据过大')
         result=json.loads(line)
-        if not result.get('ok'):raise ValueError(result.get('error','浏览器操作失败'))
+        if not result.get('ok'):
+            error=str(result.get('error') or '浏览器操作失败')
+            if result.get('dead') or BROWSER_CLOSED in error:raise BrowserDeadError('浏览器进程已退出')
+            raise ValueError(error)
         return result
     def close(self):
         if self.worker and self.worker.poll() is None:
             try:self.worker.stdin.close();self.worker.wait(timeout=5)
             except Exception:self.worker.kill();self.worker.wait()
         if self.worker:
-            try:self.worker.stdout.close()
-            except Exception:pass
+            for stream in [self.worker.stdin,self.worker.stdout]:
+                try:stream.close()
+                except Exception:pass
         if self.server and self.server.poll() is None:
             self.server.terminate()
             try:self.server.wait(timeout=2)
             except subprocess.TimeoutExpired:self.server.kill();self.server.wait()
         self.stderr.close()
+
+def chrome_binary():
+    """SCOUT_CHROME_BIN in the image; otherwise Playwright's own headless shell (None lets Playwright pick it)."""
+    binary=os.environ.get('SCOUT_CHROME_BIN')
+    if binary and not Path(binary).is_file():raise ValueError('Chrome 浏览器未安装：'+binary)
+    return binary
+def chrome_available():
+    """Cheap preflight for run_site: SCOUT_CHROME_BIN, or the headless shell revision this Playwright expects in its browsers folder."""
+    try:
+        if chrome_binary():return True
+        _,module=runtime_paths()
+        info=json.loads((Path(module).parent/'playwright-core'/'browsers.json').read_text())
+        revision=next(b['revision'] for b in info['browsers'] if b['name']=='chromium-headless-shell')
+    except Exception:return False
+    roots=[os.environ['PLAYWRIGHT_BROWSERS_PATH']] if os.environ.get('PLAYWRIGHT_BROWSERS_PATH','0')!='0' else [Path.home()/'Library'/'Caches'/'ms-playwright',Path(os.environ.get('XDG_CACHE_HOME') or Path.home()/'.cache')/'ms-playwright']
+    return any(p.is_file() for root in roots for p in Path(root).glob('chromium_headless_shell-'+str(revision)+'/*/chrome-headless-shell*'))
+class ChromeBrowser(Browser):
+    """Fallback backend: headless shell launched by the same worker; all its traffic goes through a per-site GuardProxy."""
+    label='Chrome'
+    def __init__(self,folder,*,allow_loopback_for_tests=False):
+        from egress_proxy import GuardProxy
+        _,module=runtime_paths();chrome_binary()
+        self.folder=Path(folder);self.stderr=(self.folder/'chrome.log').open('w');self.worker=None;self.server=None;self.proxy=None
+        try:
+            self.proxy=GuardProxy(allow_loopback_for_tests=allow_loopback_for_tests is True)
+            self._spawn(module,['launch',str(self.proxy.port)])
+        except Exception:self.close();raise
+    def close(self):
+        # Worker first (its browser.close() ends Chrome and the renderers), then the proxy and any tunnels still open.
+        try:
+            if self.worker and self.worker.poll() is None:
+                try:self.worker.stdin.close();self.worker.wait(timeout=8)
+                except Exception:self.worker.kill();self.worker.wait()
+            Browser.close(self)
+        finally:
+            if self.proxy:self.proxy.close()
 
 def data_uri_bytes(uri):
     """Bytes of a base64 data: URI, size-checked before decoding; None when not base64 or invalid."""
@@ -206,7 +257,7 @@ def public_peer(sock):
     """validate_url resolves DNS once and urllib resolves again; checking the connected peer closes the rebinding window (every redirect hop too)."""
     try:address=sock.getpeername()[0]
     except OSError:sock.close();raise
-    if not ipaddress.ip_address(address.split('%')[0]).is_global:sock.close();raise ValueError('禁止访问内网、回环或保留地址')
+    if not is_public_ip(address):sock.close();raise ValueError('禁止访问内网、回环或保留地址')
     return sock
 def _peer_checked(base):
     class Connection(base):
@@ -238,14 +289,19 @@ def run_qr_decoder(path):
     if output.returncode:raise ValueError('二维码未解码成功，已保留图片来源')
     return json.loads(output.stdout)
 
-def decode_qr(snapshot,ref,browser,folder):
+QR_RESERVE=45  # one 30s browser command plus a 15s decoder run
+def decode_qr(snapshot,ref,browser,folder,deadline=None,clock=time.monotonic):
     """data: URI bytes -> safe Python download (img/background) -> canvas pixels and drawImage sources (Moli does not paint canvas) -> element screenshot."""
     image=next((i for i in snapshot.get('images',[]) if i['ref']==ref),None)
     if not image:raise ValueError('图片编号已过期，请重新观察')
     path=Path(folder)/('qr-'+ref+'.png');src=image.get('src','');kind=image.get('kind') or ('canvas' if image.get('tag')=='CANVAS' else 'img')
     errors=[];result=None
+    def late():
+        if deadline is not None and deadline-clock()<QR_RESERVE:errors.append('本站剩余时间不足，跳过其余二维码识别方式');return True
+        return False
     def attempt(load):
         nonlocal result
+        if late():return False
         try:
             data=load()
             if data is None:return False
@@ -258,14 +314,14 @@ def decode_qr(snapshot,ref,browser,folder):
     def from_source(value):
         return (lambda:data_uri_bytes(value)) if value.startswith('data:') else (lambda:download_image(value)) if value.startswith(('http://','https://')) else (lambda:None)
     if src.startswith(('data:','http://','https://')) and attempt(from_source(src)):return result
-    if browser is not None and (kind=='canvas' or src.startswith(('http://','https://'))):
+    if browser is not None and (kind=='canvas' or src.startswith(('http://','https://'))) and not late():
         try:info=browser.command({'type':'image_data','ref':ref}).get('image') or {}
         except BrowserDeadError:raise
         except Exception as error:info={};errors.append(str(error)[:200])
         if info.get('data_uri') and attempt(from_source(info['data_uri'])):return result
         for source in [s for s in info.get('sources') or [] if isinstance(s,str)][:4]:
             if attempt(from_source(source)):return result
-    if browser is not None:
+    if browser is not None and not late():
         def screenshot():browser.command({'type':'screenshot','ref':ref,'path':str(path)});return path.read_bytes()
         if attempt(screenshot):return result
     if result is not None:return result
@@ -281,7 +337,14 @@ contacts是本轮新发现，不重复输出已知项。缺失项写null或[]，
 全量模式才收集目标模型报价，model必须是传入规则model的一个值，保留model_name、input_price/output_price/cache_price、currency、unit、group、group_multiplier、resource_form、source、evidence、notes；price_text保留范围价和条件。不把分组倍率、充值折扣冒充官方目录折扣，ratio不能确认时为null。仅联系方式模式不要查看、提取或判断报价。
 当合理检查完或已找到足够可用渠道时finish；不要无止境翻页。若任务预算用尽，保留已有事实，说明未完成。'''
 
-def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12,browser_factory=Browser):
+SOFT_DEADLINE_WARNING='本站检查时间已用完，保留已核实的结果，可单独继续'
+CONTACT_HINT=re.compile(r'[^\s@]+@[^\s@]+\.[a-z]{2,}|微信|wechat|weixin|QQ|t\.me/|telegram|discord|电话|手机|tel:|mailto:|(?<!\d)1[3-9]\d{9}(?!\d)',re.I)
+def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12,browser_factory=Browser,deadline=None,escalate_weak=False,clock=time.monotonic,weak_deadline=None):
+    """deadline: soft monotonic deadline; no new step starts with less than STEP_RESERVE left. weak_deadline: the tighter deadline that
+    applies once a page was weak (or the browser died) and nothing has been found, leaving time for the Chrome retry.
+    escalate_weak: when the first page is render_weak and shows no contact-like text, one program-side wait (no model call);
+    still weak -> end now so run_site can hand over to Chrome.
+    Returns an internal _fallback={weak,dead,escalated} that run_site reads and removes."""
     if scope not in ['all','contacts']:raise ValueError('采集模式无效')
     service=model_service if isinstance(model_service,ModelService) else ModelService(model_service)
     if not service.public()['configured']:raise AgentServiceError('请先配置 API URL、模型名和 API Key')
@@ -291,14 +354,17 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
         try:service.test()
         except ModelTransientError as error:raise ModelTransientSiteError(MODEL_TRANSIENT_SUMMARY+'：'+str(error),{'contacts':{},'contact_records':[],'contact_status':'incomplete','contact_summary':MODEL_TRANSIENT_SUMMARY,'sources':[],'steps':[],'warnings':[str(error)],'offers':[],'scope':scope,'model_transient':True})
         except ValueError as error:raise AgentServiceError(str(error))
-    policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False;weak=[]
+    policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False;weak=[];fallback={'weak':False,'dead':False,'escalated':False}
+    label=getattr(browser_factory,'label','Moli');method=label+' 浏览器 Agent'
+    def current_deadline():
+        return weak_deadline if weak_deadline is not None and fallback['weak'] and not records else deadline
     def result():
         # Weak only if no observation rendered properly: one short subpage after a good homepage is not a Moli failure.
         site_weak=bool(weak) and not any(not s.get('render_weak') for s in observations)
         contacts={}
         for item in records:contacts.setdefault(item['type'],[]).append(item['value'])
         # render_weak: Moli rendered too little; never let it read as "no contacts". blocked/incomplete keep the site in '继续未完成' (future Chrome fallback hook).
-        return {'contacts':contacts,'contact_records':records,'contact_status':choose_contact_status(records,blocked or site_weak,len(steps)),'contact_summary':('已找到 '+str(len(records))+' 条联系线索，按用途确认后跟进' if records else RENDER_WEAK_SUMMARY if site_weak else '访问受阻，不能判定网站没有联系方式' if blocked else '本次检查范围尚未发现可核实联系方式，需继续查找'),**({'render_weak':True} if site_weak else {}),'sources':[{'url':s['url'],'method':'Moli 浏览器 Agent','excerpt':observed_text(s)[:35000],'text_length':len(observed_text(s))} for s in observations],'steps':steps,'warnings':list(dict.fromkeys(warnings)),'offers':offers if scope=='all' else [],'scope':scope}
+        return {'contacts':contacts,'contact_records':records,'contact_status':choose_contact_status(records,blocked or site_weak,len(steps)),'contact_summary':('已找到 '+str(len(records))+' 条联系线索，按用途确认后跟进' if records else RENDER_WEAK_SUMMARY if site_weak else '访问受阻，不能判定网站没有联系方式' if blocked else '本次检查范围尚未发现可核实联系方式，需继续查找'),**({'render_weak':True} if site_weak else {}),'sources':[{'url':s['url'],'method':method,'excerpt':observed_text(s)[:35000],'text_length':len(observed_text(s))} for s in observations],'steps':steps,'warnings':list(dict.fromkeys(warnings)),'offers':offers if scope=='all' else [],'scope':scope,'_fallback':dict(fallback)}
     def allow(target):
         validate_url(target);p=urllib.parse.urlsplit(target);origin=p.scheme+'://'+p.netloc
         if origin not in policy:
@@ -312,10 +378,21 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
     with tempfile.TemporaryDirectory(prefix='scout-agent-') as folder:
         browser=None
         try:
-            allow(url);log('启动 Moli 浏览器；'+('仅采集联系方式' if scope=='contacts' else '全量采集'))
+            allow(url);log('启动 '+label+' 浏览器；'+('仅采集联系方式' if scope=='contacts' else '全量采集'))
             browser=browser_factory(folder);snapshot=browser.command({'type':'open','url':url})['snapshot']
+            if escalate_weak and snapshot.get('render_weak') and not CONTACT_HINT.search(observed_text(snapshot)):
+                log(label+' 首页渲染不完整，先等待页面加载（不调用模型）')
+                snapshot=browser.command({'type':'wait'})['snapshot']
+                steps.append({'step':0,'url':snapshot['url'],'action':'wait','reason':'首页渲染不完整，程序自动等待一次','contacts_found':0,'browser':label})
             for index in range(max_steps):
                 observations.append(snapshot)
+                if escalate_weak and index==0 and snapshot.get('render_weak') and not CONTACT_HINT.search(observed_text(snapshot)):
+                    weak.append(snapshot.get('url'));fallback.update(weak=True,escalated=True)
+                    warnings.append(RENDER_WEAK_WARNING+('（页面脚本无响应）' if snapshot.get('page_unresponsive') else '（页面加载超时）' if snapshot.get('goto_timeout') else ''))
+                    log(label+' 等待后仍渲染不完整，结束本轮');finished=True;break
+                if snapshot.get('render_weak') or snapshot.get('page_unresponsive') or snapshot.get('goto_timeout'):fallback['weak']=True
+                if current_deadline() is not None and current_deadline()-clock()<STEP_RESERVE:
+                    warnings.append(SOFT_DEADLINE_WARNING);log(SOFT_DEADLINE_WARNING);finished=True;break
                 if snapshot.get('render_weak'):
                     weak.append(snapshot.get('url'));warnings.append(RENDER_WEAK_WARNING+('（页面脚本无响应）' if snapshot.get('page_unresponsive') else '（页面加载超时）' if snapshot.get('goto_timeout') else ''))
                 valid_sources={s['url']:observed_text(s) for s in observations}
@@ -355,7 +432,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
                         identity=(offer.get('model_name'),offer.get('group'),source,offer.get('price_text'),offer.get('input_price'),offer.get('output_price'))
                         if not any((o.get('model_name'),o.get('group'),o.get('source'),o.get('price_text'),o.get('input_price'),o.get('output_price'))==identity for o in offers):offers.append(offer)
                 action=decision.get('action') or {};kind=action.get('type');reason=str(decision.get('reason') or '')[:300]
-                step={'step':index+1,'url':snapshot['url'],'action':kind,'reason':reason,'contacts_found':len(records)};steps.append(step)
+                step={'step':index+1,'url':snapshot['url'],'action':kind,'reason':reason,'contacts_found':len(records),'browser':label};steps.append(step)
                 log(reason+'；已找到 '+str(len(records))+' 条联系线索')
                 if kind=='finish':finished=True;break
                 try:
@@ -373,7 +450,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
                         if not control:raise ValueError('控件编号已过期')
                         if control.get('href') and not control['href'].startswith('#'):allow(urllib.parse.urljoin(snapshot['url'],control['href']))
                     elif kind=='decode_qr':
-                        decoded=decode_qr(snapshot,str(action.get('ref','')),browser,folder)
+                        decoded=decode_qr(snapshot,str(action.get('ref','')),browser,folder,deadline=current_deadline(),clock=clock)
                         snapshot=dict(snapshot,decoded_qr=snapshot.get('decoded_qr',[])+decoded)
                         candidates=qr_contact_records(snapshot,str(action.get('ref','')),decoded)
                         verified,_=validate_contacts(candidates,[snapshot])
@@ -399,7 +476,82 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
             warnings.append(str(error)[:400]);log(MODEL_TRANSIENT_SUMMARY)
             if error.partial is None:error.partial=dict(result(),**({'contact_status':'incomplete'} if records else {}),contact_summary=(('已找到 '+str(len(records))+' 条联系线索；' if records else '')+MODEL_TRANSIENT_SUMMARY),model_transient=True)
             raise
+        except BrowserDeadError as error:fallback['dead']=True;blocked=True;warnings.append(str(error)[:400]);log('访问受阻：'+str(error)[:200])
         except Exception as error:blocked=True;warnings.append(str(error)[:400]);log('访问受阻：'+str(error)[:200])
         finally:
             if browser:browser.close()
     return result()
+
+# Per-site time budget (seconds from run_site start). server.collect_site's hard timeout (840s) discards the whole result, so
+# both runs stop on these soft deadlines first. STEP_RESERVE ~ worst case of three model attempts plus one browser command.
+MOLI_BUDGET=360;SITE_BUDGET=810;STEP_RESERVE=210
+CHROME_RETRIED='Moli 渲染不完整，已改用 Chrome 重试'
+NO_CHROME_WARNING='未安装 Chrome 备用浏览器，仅使用 Moli'
+BOTH_WEAK_SUMMARY='Moli 与 Chrome 均未能完整渲染页面，未能判定联系方式，可稍后重试'
+def chrome_enabled():
+    # Can only switch the fallback off; it never loosens any network restriction.
+    return os.environ.get('SCOUT_CHROME_FALLBACK','1').strip()!='0'
+def strip_internal(result):
+    if isinstance(result,dict):result.pop('_fallback',None)
+    return result
+def needs_chrome(result):
+    """Moli rendered too little to judge, or found nothing while some page was weak or the browser died mid-site."""
+    fallback=result.get('_fallback') or {}
+    return bool(result.get('render_weak') or (not result.get('contact_records') and (fallback.get('weak') or fallback.get('dead'))))
+def merge_results(moli,chrome):
+    """Union of both runs, Moli first. Duplicate Chrome contacts become additional_sources of the Moli record."""
+    records=[dict(r,browser=r.get('browser') or 'Moli') for r in moli.get('contact_records',[])]
+    for item in chrome.get('contact_records',[]):
+        prior=next((r for r in records if r['type']==item['type'] and r['value'].lower()==item['value'].lower()),None)
+        if prior:prior['additional_sources']=list(prior.get('additional_sources') or [])+[{'source_url':item.get('source_url'),'evidence':item.get('evidence'),'browser':'Chrome'}]+[dict(s,browser='Chrome') for s in item.get('additional_sources') or []]
+        else:records.append(dict(item,browser='Chrome'))
+    contacts={}
+    for item in records:contacts.setdefault(item['type'],[]).append(item['value'])
+    offers=list(moli.get('offers',[]))
+    key=lambda o:(o.get('model_name'),o.get('group'),o.get('source'),o.get('price_text'),o.get('input_price'),o.get('output_price'))
+    for offer in chrome.get('offers',[]):
+        if not any(key(o)==key(offer) for o in offers):offers.append(offer)
+    steps=[dict(s,browser=s.get('browser') or 'Moli') for s in moli.get('steps',[])]+[dict(s,browser=s.get('browser') or 'Chrome') for s in chrome.get('steps',[])]
+    chrome_ok=bool(chrome.get('sources')) and not chrome.get('render_weak')
+    both_weak=bool(moli.get('render_weak')) and not chrome_ok
+    if records:status=choose_contact_status(records,True,len(steps));summary='已找到 '+str(len(records))+' 条联系线索，按用途确认后跟进'
+    elif chrome_ok:status=chrome.get('contact_status');summary=chrome.get('contact_summary')
+    else:status='blocked';summary=BOTH_WEAK_SUMMARY if both_weak else '访问受阻，不能判定网站没有联系方式'
+    return {'contacts':contacts,'contact_records':records,'contact_status':status,'contact_summary':summary,**({'render_weak':True} if both_weak else {}),
+        'sources':list(moli.get('sources',[]))+list(chrome.get('sources',[])),'steps':steps,'warnings':list(dict.fromkeys([CHROME_RETRIED if chrome_ok and w.startswith(RENDER_WEAK_WARNING) else w for w in moli.get('warnings',[])]+list(chrome.get('warnings',[])))),
+        'offers':offers,'scope':moli.get('scope') or chrome.get('scope')}
+def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browser,chrome_factory=ChromeBrowser,clock=time.monotonic,chrome_ready=chrome_available):
+    """Moli first; at most one Chrome retry (started only after Moli's browser is closed by run_agent's finally).
+    Moli keeps the whole budget unless a page turns weak with nothing found; then it stops at MOLI_BUDGET to leave Chrome its time."""
+    start=clock();enabled=chrome_enabled();missing=enabled and not chrome_ready();enabled=enabled and not missing
+    def moli_run(escalate):
+        result=run_agent(url,scope,service,rules,log,browser_factory=moli_factory,deadline=start+SITE_BUDGET,weak_deadline=start+MOLI_BUDGET if escalate else None,escalate_weak=escalate,clock=clock)
+        if missing:result['warnings'].append(NO_CHROME_WARNING)
+        return result
+    def only_moli(result,warning=None):
+        result=strip_internal(result);result['contact_records']=[dict(r,browser='Moli') for r in result['contact_records']]
+        if warning:result['warnings'].append(warning)
+        return result
+    def without_chrome(result,warning):
+        # The early hand-over skipped Moli's model steps; if Chrome then observed nothing, give Moli its normal run back while time allows.
+        if (result.get('_fallback') or {}).get('escalated') and start+SITE_BUDGET-clock()>=STEP_RESERVE:
+            log('Chrome 未能读取页面，回到 Moli 继续检查')
+            try:again=moli_run(False)
+            except AgentServiceError as error:strip_internal(getattr(error,'partial',None));raise
+            except ModelTransientSiteError as error:return only_moli(result,warning+'；'+str(error)[:200])
+            return only_moli(again,warning)
+        return only_moli(result,warning)
+    try:moli=moli_run(enabled)
+    except (AgentServiceError,ModelTransientSiteError) as error:strip_internal(getattr(error,'partial',None));raise
+    if not enabled or not needs_chrome(moli):return only_moli(moli)
+    if start+SITE_BUDGET-clock()<STEP_RESERVE:return only_moli(moli,'本站剩余时间不足，未启动 Chrome 备用浏览器')
+    log('Moli 未能完整读取页面，改用 Chrome 备用浏览器重试')
+    try:chrome=run_agent(url,scope,service,rules,log,browser_factory=chrome_factory,deadline=start+SITE_BUDGET,clock=clock)
+    except ModelTransientSiteError as error:return only_moli(moli,'Chrome 备用浏览器未完成：'+str(error)[:300])
+    except AgentServiceError as error:
+        error.partial=merge_results(strip_internal(moli),strip_internal(error.partial or {}));raise
+    except Exception as error:return without_chrome(moli,'Chrome 备用浏览器未完成：'+str(error)[:300])
+    strip_internal(chrome)
+    # Chrome never observed a page (launch failure, robots/network refusal): keep Moli's result.
+    if not chrome.get('sources'):return without_chrome(moli,'Chrome 备用浏览器未完成：'+((chrome.get('warnings') or ['未能打开页面'])[-1])[:300])
+    return merge_results(strip_internal(moli),chrome)
