@@ -1,0 +1,22 @@
+# Whitelist the source needed for the worker. No data or local runtime artifacts.
+**
+!Dockerfile
+!.dockerignore
+!*.py
+!*.cjs
+!*.swift
+!requirements.txt
+!package.json
+!package-lock.json
+!business_catalog.json
+!static/
+!static/**
+# Defense in depth for accidentally added credentials and screenshots.
+**/.env*
+**/*secret*
+**/*credential*
+**/*.db
+**/*.sqlite*
+**/*.png
+**/*.jpg
+**/*.jpeg

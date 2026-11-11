@@ -1,0 +1,104 @@
+{
+  "source": "A_价格规则部分代码.md；用户于2026-11-10提供",
+  "currency": "CNY",
+  "default_unit": "每百万tokens",
+  "catalog": {
+    "kimik3": {
+      "input": 20,
+      "output": 100
+    },
+    "k3": {
+      "input": 20,
+      "output": 100
+    },
+    "kimik3.1pro": {
+      "input": 13,
+      "output": 68
+    },
+    "k3.1pro": {
+      "input": 13,
+      "output": 68
+    },
+    "kimik3.1prohighspeed": {
+      "input": 26,
+      "output": 136
+    },
+    "k3.1prohighspeed": {
+      "input": 26,
+      "output": 136
+    },
+    "deepseekv4.1flash1017": {
+      "input": 2,
+      "output": 8
+    },
+    "deepseekv4.1flash": {
+      "input": 2,
+      "output": 8
+    },
+    "deepseekv4pro0813": {
+      "input": 12,
+      "output": 24
+    },
+    "deepseekv4flash0731": {
+      "input": 1,
+      "output": 2
+    },
+    "glm5.3flash": {
+      "input": 0.8,
+      "output": 2.8
+    },
+    "glm5.3": {
+      "input": 8,
+      "output": 28
+    },
+    "glm5.2": {
+      "input": 8,
+      "output": 28
+    },
+    "qwen3.8max": {
+      "input": 12,
+      "output": 36
+    },
+    "qwen3.8max(batchfile)": {
+      "input": 6,
+      "output": 18
+    },
+    "qwen3.8max(batchchat)": {
+      "input": 12,
+      "output": 36
+    },
+    "qwen3.7max": {
+      "input": 12,
+      "output": 36
+    },
+    "wan3.0videoprime480p": {
+      "video": 0.45,
+      "unit": "元/秒"
+    },
+    "wan3.0videoprime720p": {
+      "video": 0.9,
+      "unit": "元/秒"
+    },
+    "wan3.0videoprime1080p": {
+      "video": 1.8,
+      "unit": "元/秒"
+    },
+    "wan3.0video480p": {
+      "video": 0.3,
+      "unit": "元/秒"
+    },
+    "wan3.0video720p": {
+      "video": 0.6,
+      "unit": "元/秒"
+    },
+    "wan3.0video1080p": {
+      "video": 1.2,
+      "unit": "元/秒"
+    }
+  },
+  "notes": [
+    "目录价仅精确匹配版本及条件，不按家族猜单价",
+    "GLM5.1上下文档位及Seedance条件价格保留原文待确认",
+    "美元和人民币不自动混算；输入输出分别计算"
+  ]
+}

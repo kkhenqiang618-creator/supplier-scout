@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+data/
+.DS_Store
+node_modules/
+runtime/
+
+.env*
+.vercel/
+/*.png
+/*.jpg
+/*.jpeg
+*.db
+*.sqlite*
+*secret*
+*credential*

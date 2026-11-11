@@ -1,0 +1,33 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": [
+    "sin1"
+  ],
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 120,
+      "excludeFiles": "{node_modules/**,runtime/**,data/**,work/**,tests/**,*.png,*.jpg}"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/index.py"
+    }
+  ],
+  "daemons": {
+    "browser-worker": {
+      "root": ".",
+      "entrypoint": "Dockerfile",
+      "instances": {
+        "sin1": 0
+      },
+      "resources": {
+        "requests": {
+          "memory": "1Gi"
+        }
+      },
+      "terminationGracePeriodSeconds": 30
+    }
+  }
+}

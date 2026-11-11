@@ -1,0 +1,12 @@
+{
+  "name": "supplier-scout-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "jpeg-js": "0.4.4",
+    "jsqr": "1.4.0",
+    "playwright": "1.65.0",
+    "pngjs": "7.0.0"
+  }
+}

@@ -1,0 +1,14 @@
+.git
+node_modules
+runtime
+data
+tests
+.env*
+*.png
+*.jpg
+*.jpeg
+*.db
+*.sqlite*
+*secret*
+*credential*
+启动.command
