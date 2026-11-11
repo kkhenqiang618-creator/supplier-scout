@@ -168,8 +168,19 @@ class PostgresStore(Store):
         return self.job_state(row) if row else dict(IDLE)
     @staticmethod
     def job_state(row):
-        state={key:value for key,value in row['state'].items() if not key.startswith('_')};state.update(status=row['status'],running=row['status'] in ACTIVE,stopping=row['cancel_requested'],done=row['position'],scope=row['scope'],mode=row['mode'],id=row['id'])
+        state={key:value for key,value in row['state'].items() if not key.startswith('_')};state.update(status=row['status'],running=row['status'] in ACTIVE,stopping=bool(row['cancel_requested']) and row['status'] in ('running','stopping'),done=row['position'],scope=row['scope'],mode=row['mode'],id=row['id'])
+        clock=time.time()
+        # Ages are computed server-side (worker and HTTP hosts share NTP time) so a skewed browser clock cannot fake the hints.
+        state.update(waiting_seconds=int(clock-state['queued_at']) if row['status']=='queued' and not state.get('claimed_at') and state.get('queued_at') else 0,heartbeat_age=int(clock-state['heartbeat_at']) if row['status'] in ('running','stopping') and state.get('heartbeat_at') else 0)
         return state
+    @staticmethod
+    def order_rows(rows,scope):
+        """Never-attempted rows first, then the oldest attempt, so a retried batch does not reopen on the same failing site."""
+        def attempt(row):
+            stamps=[row.get('checked_at')] if scope=='all' else []
+            if scope=='contacts' or row.get('attempt_scope')=='all':stamps.append(row.get('contact_checked_at'))
+            stamps=[str(stamp) for stamp in stamps if stamp];return (1,max(stamps)) if stamps else (0,'')
+        return sorted(rows,key=lambda row:(attempt(row),row['id']))
     def state(self,full=True):
         if full:
             data=Store.state(self)
@@ -213,11 +224,15 @@ class PostgresStore(Store):
         from cloud_scaling import enabled
         if os.environ.get('VERCEL') and not enabled():raise ValueError('云端浏览器启动凭据未就绪，请检查部署配置')
         with self.database.transaction(write=True) as db:
-            if db.execute("SELECT id FROM cloud_jobs WHERE status IN ('queued','running','stopping')").fetchone():raise ValueError('已有云端批次运行，请停止或等待完成')
-            rows=[row for row in Store.state(self)['suppliers'] if row['mode']==mode and ((ids and row['id'] in ids) or (not ids and (mode=='demo' or selection=='all' or scope=='contacts' and row['contact_status']!='found' or scope=='all' and row['status']=='pending')))]
+            active=db.execute("SELECT id,status,(lease_owner IS NULL OR lease_until IS NULL OR lease_until<now()) AS stale FROM cloud_jobs WHERE status IN ('queued','running','stopping')").fetchone()
+            if active:raise ValueError('上一个批次的后台进程已失联，请先点击停止' if active['status'] in ('running','stopping') and active['stale'] else '已有云端批次运行，请停止或等待完成')
+            # Light projection under the same per-user RLS scope as Store.state; avoids decoding every source excerpt just to pick ids.
+            candidates=db.execute("SELECT id,mode,status,contact_status,checked_at,contact_checked_at,contact_result::jsonb->>'scope' AS attempt_scope FROM suppliers ORDER BY id").fetchall()
+            rows=[row for row in candidates if row['mode']==mode and ((ids and row['id'] in ids) or (not ids and (mode=='demo' or selection=='all' or scope=='contacts' and row['contact_status']!='found' or scope=='all' and row['status']=='pending')))]
             if not rows:raise ValueError('该范围没有待采集记录；可选择重新检查全部')
+            rows=self.order_rows(rows,scope)
             snapshot=self.model_service.snapshot() if mode=='real' else ''
-            job_id=uuid.uuid4().hex;state=dict(IDLE,requested_by=getattr(self,'username',''),_model_config=snapshot,mode=mode,scope=scope,selection=selection,total=len(rows),stage='云端任务已排队，等待浏览器执行',current='等待云端浏览器')
+            job_id=uuid.uuid4().hex;state=dict(IDLE,requested_by=getattr(self,'username',''),_model_config=snapshot,mode=mode,scope=scope,selection=selection,total=len(rows),queued_at=time.time(),claimed_at=None,heartbeat_at=None,stage='云端任务已排队，等待浏览器执行',current='等待云端浏览器')
             db.execute('INSERT INTO cloud_jobs(id,mode,scope,selection,supplier_ids,state) VALUES(?,?,?,?,?,?)',(job_id,mode,scope,selection,Jsonb([row['id'] for row in rows]),Jsonb(state)))
             self.event(('仅联系方式' if scope=='contacts' else '全量采集')+'云端批次已排队：'+str(len(rows))+' 家',mode=mode)
             from cloud_scaling import set_instances
@@ -225,15 +240,19 @@ class PostgresStore(Store):
         return self.job
     def stop_job(self):
         with self.database.transaction(write=True) as db:
-            active=db.execute("SELECT state FROM cloud_jobs WHERE status IN ('queued','running','stopping')").fetchone()
+            active=db.execute("SELECT state,id,mode,position,status,(status='queued' OR lease_owner IS NULL OR lease_until IS NULL OR lease_until<now()) AS stale FROM cloud_jobs WHERE status IN ('queued','running','stopping') FOR UPDATE").fetchone()
             if active and getattr(self,'username',None) and active['state'].get('requested_by')!=self.username:raise ValueError('仅任务发起人可以停止此批次')
-            db.execute("UPDATE cloud_jobs SET cancel_requested=true,status=CASE WHEN status='queued' THEN 'stopped' ELSE 'stopping' END,state=state||?,updated_at=now() WHERE status IN ('queued','running','stopping')",(Jsonb({'stage':'已请求停止云端浏览器，保留完成记录'}),))
+            if active and active['stale']:
+                # No live lease: finalise here. A late worker's fenced writes and heartbeats require its lease and an active status, so they now raise LostLease.
+                db.execute("UPDATE cloud_jobs SET cancel_requested=true,status='stopped',lease_owner=NULL,lease_until=NULL,state=state||?,updated_at=now() WHERE id=?",(Jsonb({'stage':'云端采集已停止','current':''}),active['id']))
+                self.event('云端批次已停止'+('' if active['status']=='queued' else '（后台进程已失联）')+'；已完成 '+str(active['position'])+' / '+str(active['state'].get('total',0))+' 家',mode=active['mode'])
+            elif active:db.execute("UPDATE cloud_jobs SET cancel_requested=true,status='stopping',state=state||?,updated_at=now() WHERE id=?",(Jsonb({'stage':'已请求停止云端浏览器，保留完成记录'}),active['id']))
         return self.job
     def claim_job(self,owner):
         with self.database.transaction(write=True) as db:
             row=db.execute("SELECT * FROM cloud_jobs WHERE status='queued' OR (status IN ('running','stopping') AND lease_until<now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1").fetchone()
             if not row:return None
-            return db.execute("UPDATE cloud_jobs SET status=CASE WHEN cancel_requested THEN 'stopping' ELSE 'running' END,lease_owner=?,lease_until=now()+interval '45 seconds',updated_at=now() WHERE id=? RETURNING *",(owner,row['id'])).fetchone()
+            return db.execute("UPDATE cloud_jobs SET status=CASE WHEN cancel_requested THEN 'stopping' ELSE 'running' END,lease_owner=?,lease_until=now()+interval '45 seconds',state=state||?,updated_at=now() WHERE id=? RETURNING *",(owner,Jsonb({'claimed_at':time.time(),'heartbeat_at':time.time()}),row['id'])).fetchone()
     @contextlib.contextmanager
     def fenced(self,job_id,owner):
         with self.database.transaction(write=True) as db:
@@ -242,7 +261,7 @@ class PostgresStore(Store):
             yield db,row
     def heartbeat(self,job_id,owner):
         with self.database.transaction() as db:
-            row=db.execute("UPDATE cloud_jobs SET lease_until=now()+interval '45 seconds',updated_at=now() WHERE id=? AND lease_owner=? AND lease_until>now() AND status IN ('running','stopping') RETURNING cancel_requested",(job_id,owner)).fetchone()
+            row=db.execute("UPDATE cloud_jobs SET lease_until=now()+interval '45 seconds',state=state||?,updated_at=now() WHERE id=? AND lease_owner=? AND lease_until>now() AND status IN ('running','stopping') RETURNING cancel_requested",(Jsonb({'heartbeat_at':time.time()}),job_id,owner)).fetchone()
         if not row:raise LostLease('云端任务租约失效')
         return row['cancel_requested']
     def progress(self,job_id,owner,stage,current=None):
