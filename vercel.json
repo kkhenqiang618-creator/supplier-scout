@@ -3,12 +3,6 @@
   "regions": [
     "sin1"
   ],
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 120,
-      "excludeFiles": "{node_modules/**,runtime/**,data/**,work/**,tests/**,*.png,*.jpg}"
-    }
-  },
   "rewrites": [
     {
       "source": "/(.*)",
@@ -29,5 +23,15 @@
       },
       "terminationGracePeriodSeconds": 30
     }
-  }
+  },
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxDuration": 120,
+        "excludeFiles": "{node_modules/**,runtime/**,data/**,work/**,tests/**,*.png,*.jpg}"
+      }
+    }
+  ]
 }
