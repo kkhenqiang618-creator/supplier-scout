@@ -76,6 +76,9 @@ class CloudModelService(ModelService):
     def _write(self,data):
         value=self.cipher.encrypt(encode(data).encode()).decode()
         with self.database.transaction(write=True) as db:db.execute("INSERT INTO settings(key,value) VALUES('model-service',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(value,))
+    def _finish_test(self,config,original_model,answer):
+        with self.lock,self.database.transaction(write=True):
+            return super()._finish_test(config,original_model,answer)
     def materialize(self,folder):
         path=Path(folder)/'model-service.json';ModelService(path)._write(self.read());return path
 
@@ -109,10 +112,22 @@ class PostgresStore(Store):
         with self.database.transaction(write=True) as db:db.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',('rules',encode(A_RULES)))
     def connect(self):return self.database.transaction()
     def _write(self,method,*args,**kwargs):
-        with self.lock,self.database.transaction(write=True):return method(self,*args,**kwargs)
+        with self.database.transaction(write=True),self.lock:return method(self,*args,**kwargs)
     def event(self,*args,**kwargs):return self._write(Store.event,*args,**kwargs)
     def import_rows(self,*args,**kwargs):return self._write(Store.import_rows,*args,**kwargs)
-    def save_result(self,*args,**kwargs):return self._write(Store.save_result,*args,**kwargs)
+    def save_result(self,sid,result):
+        with self.database.transaction(write=True),self.lock:
+            current=self.get(sid);contacts={kind:list(values) for kind,values in current['contacts'].items()}
+            for kind,values in result.get('contacts',{}).items():
+                known={str(value).casefold() for value in contacts.get(kind,[])}
+                for value in values:
+                    if str(value).casefold() not in known:
+                        contacts.setdefault(kind,[]).append(value);known.add(str(value).casefold())
+            sources=list(current['sources']);known={(item.get('url'),item.get('excerpt')) for item in sources}
+            for item in result.get('sources',[]):
+                key=(item.get('url'),item.get('excerpt'))
+                if key not in known:sources.append(item);known.add(key)
+            return Store.save_result(self,sid,dict(result,contacts=contacts,sources=sources))
     def save_contacts(self,*args,**kwargs):return self._write(Store.save_contacts,*args,**kwargs)
     def review(self,*args,**kwargs):return self._write(Store.review,*args,**kwargs)
     def update_rules(self,*args,**kwargs):return self._write(Store.update_rules,*args,**kwargs)

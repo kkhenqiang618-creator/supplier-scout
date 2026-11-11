@@ -80,6 +80,8 @@ class ModelService:
             if original_model not in available and len(matches)==1:config=dict(config,model=matches[0])
         except Exception:pass  # Some compatible services do not expose /models.
         answer=self.complete([{'role':'user','content':'只回复 OK，验证连接。'}],config=config)
+        return self._finish_test(config,original_model,answer)
+    def _finish_test(self,config,original_model,answer):
         with self.lock:
             current=self.read()
             if current.get('revision')!=config.get('revision'):raise ValueError('测试期间配置已变更，请为当前配置重新测试连接')

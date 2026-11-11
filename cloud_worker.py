@@ -70,10 +70,11 @@ def execute_job(store,job,owner,shutdown):
 def main():
     shutdown=threading.Event()
     signal.signal(signal.SIGTERM,lambda *_:shutdown.set());signal.signal(signal.SIGINT,lambda *_:shutdown.set())
-    store=PostgresStore();owner=uuid.uuid4().hex;idle_since=time.monotonic()
+    store=PostgresStore();idle_since=time.monotonic()
     print('Supplier Scout cloud worker ready',flush=True)
     while not shutdown.is_set():
         try:
+            owner=uuid.uuid4().hex
             job=store.claim_job(owner)
             if job:
                 execute_job(store,job,owner,shutdown);idle_since=time.monotonic()
