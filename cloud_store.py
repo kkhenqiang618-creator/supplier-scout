@@ -14,7 +14,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from cryptography.fernet import Fernet
 from model_service import ModelService
-from server import Store, encode, now
+from server import Store, encode, now, select_rows, SELECTIONS
 from rulebook import A_RULES
 
 WRITE_LOCK=732198461
@@ -222,7 +222,7 @@ class PostgresStore(Store):
         try:return self._start_job(mode,ids,scope,selection)
         except psycopg.errors.UniqueViolation:raise ValueError('云端浏览器正在执行任务，请稍后重试') from None
     def _start_job(self,mode,ids=None,scope='all',selection='remaining'):
-        if mode not in ['real','demo'] or scope not in ['all','contacts'] or selection not in ['remaining','all']:raise ValueError('采集模式或范围无效')
+        if mode not in ['real','demo'] or scope not in ['all','contacts'] or selection not in SELECTIONS:raise ValueError('采集模式或范围无效')
         if mode=='real' and (not self.model_service.public()['configured'] or not self.model_service.public()['key_configured']):raise ValueError('请先为当前账号配置 API URL、模型名和 API Key')
         from cloud_scaling import enabled
         if os.environ.get('VERCEL') and not enabled():raise ValueError('云端浏览器启动凭据未就绪，请检查部署配置')
@@ -231,8 +231,8 @@ class PostgresStore(Store):
             if active:raise ValueError('上一个批次的后台进程已失联，请先点击停止' if active['status'] in ('running','stopping') and active['stale'] else '已有云端批次运行，请停止或等待完成')
             # Light projection under the same per-user RLS scope as Store.state; avoids decoding every source excerpt just to pick ids.
             candidates=db.execute("SELECT id,mode,status,contact_status,checked_at,contact_checked_at,contact_result::jsonb->>'scope' AS attempt_scope FROM suppliers ORDER BY id").fetchall()
-            rows=[row for row in candidates if row['mode']==mode and ((ids and row['id'] in ids) or (not ids and (mode=='demo' or selection=='all' or scope=='contacts' and row['contact_status']!='found' or scope=='all' and row['status']=='pending')))]
-            if not rows:raise ValueError('该范围没有待采集记录；可选择重新检查全部')
+            rows=select_rows(candidates,mode,ids,scope,selection)
+            if not rows:raise ValueError('没有采集受阻的记录；可改选全部或继续未完成' if selection=='blocked' else '该范围没有待采集记录；可选择重新检查全部')
             rows=self.order_rows(rows,scope)
             snapshot=self.model_service.snapshot() if mode=='real' else ''
             job_id=uuid.uuid4().hex;state=dict(IDLE,requested_by=getattr(self,'username',''),_model_config=snapshot,mode=mode,scope=scope,selection=selection,total=len(rows),queued_at=time.time(),claimed_at=None,heartbeat_at=None,stage='云端任务已排队，等待浏览器执行',current='等待云端浏览器')

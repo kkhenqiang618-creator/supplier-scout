@@ -29,6 +29,27 @@ ROOT=Path(__file__).resolve().parent
 
 def now(): return datetime.now(timezone.utc).isoformat(timespec='seconds')
 def encode(value): return json.dumps(value,ensure_ascii=False,allow_nan=False)
+SELECTIONS=['remaining','all','blocked']
+
+def select_rows(rows,mode,ids=None,scope='all',selection='remaining'):
+    """Pick the rows one batch should process.
+    remaining: never-finished rows only (or every demo row, as before).
+    blocked: rows whose last contact check was blocked or incomplete, plus error rows, so a
+    failed batch can be retried without re-running the whole list.
+    ids: an explicit list wins over the other selections (single row / checkbox retry)."""
+    picked=[]
+    for row in rows:
+        if row['mode']!=mode: continue
+        if ids:
+            if row['id'] in ids: picked.append(row)
+        elif selection=='all': picked.append(row)
+        elif selection=='blocked':
+            if row['status']=='error' or row['contact_status'] in ('blocked','incomplete'): picked.append(row)
+        elif mode=='demo': picked.append(row)
+        elif scope=='contacts':
+            if row['contact_status']!='found': picked.append(row)
+        elif row['status']=='pending': picked.append(row)
+    return picked
 
 class CollectionCancelled(Exception): pass
 class AgentServiceError(ValueError):
@@ -256,17 +277,16 @@ class Store:
         self.event('示例工作区已就绪：12 家虚构供应商，未访问或联系任何真实供应商',mode='demo')
     def start_job(self,mode,ids=None,scope='all',selection='remaining'):
         if mode not in ['real','demo']: raise ValueError('数据模式错误')
-        if scope not in ['all','contacts'] or selection not in ['remaining','all']: raise ValueError('采集模式或范围无效')
+        if scope not in ['all','contacts'] or selection not in SELECTIONS: raise ValueError('采集模式或范围无效')
         if mode=='real':
             if not self.model_service.public()['configured']: raise ValueError('请先在模型服务设置中填写 API URL、模型名和 API Key')
             from browser_agent import runtime_paths
             runtime_paths()
         if not self.job_lock.acquire(blocking=False): raise ValueError('已有批次运行，请等待完成')
-        rows=[r for r in self.state()['suppliers'] if r['mode']==mode and (
-            (ids and r['id'] in ids) or (not ids and (mode=='demo' or selection=='all' or
-            (scope=='contacts' and r['contact_status']!='found') or
-            (scope=='all' and r['status']=='pending'))))]
-        if not rows: self.job_lock.release(); raise ValueError('该范围没有待采集记录；可选择重新检查全部')
+        rows=select_rows(self.state()['suppliers'],mode,ids,scope,selection)
+        if not rows:
+            self.job_lock.release()
+            raise ValueError('没有采集受阻的记录；可改选全部或继续未完成' if selection=='blocked' else '该范围没有待采集记录；可选择重新检查全部')
         self.stop_event.clear()
         self.job.update(scope=scope,selection=selection,running=True,status='running',stopping=False,stage='准备中',total=len(rows),done=0,mode=mode,current='准备中')
         self.job_thread=threading.Thread(target=self.run_job,args=(rows,mode,scope),daemon=True)

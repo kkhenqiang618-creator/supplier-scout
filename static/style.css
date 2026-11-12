@@ -6,3 +6,9 @@
 @media(max-width:680px){.dashboard-grid .side-stack{grid-template-columns:1fr}}
 .inline-contact-value small.contact-risk{color:#b29057;font-size:9px}
 .quote-warning{margin-top:12px}.quote-warning>summary{cursor:pointer;font-size:10px;color:#a38f65}
+/* Batch selection: retry only the rows the user picks or the ones that were blocked. */
+.pick-cell{width:34px;padding-left:14px!important;padding-right:0!important}
+.pick-cell input{width:14px;height:14px;accent-color:var(--purple);cursor:pointer}
+.picked-bar{display:flex;align-items:center;gap:8px;padding:5px 8px 5px 10px;border:1px solid #ded9ff;background:var(--pale);border-radius:7px;font-size:11px;color:var(--purple)}
+.picked-bar[hidden]{display:none}
+.picked-bar span{white-space:nowrap}
