@@ -8,7 +8,7 @@ from model_service import ModelService
 from server import Store
 
 class ReliabilityTests(unittest.TestCase):
-    def run_agent(self,snapshot,decision,commands=None):
+    def run_agent(self,snapshot,decision,commands=None,chrome_snapshot=None):
         commands=[] if commands is None else commands
         class FakeBrowser:
             label='Fixture'
@@ -22,7 +22,12 @@ class ReliabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             service=ModelService(Path(folder)/'model.json');service.save({'base_url':'https://model.example/v1','model':'fixture'});config=service.read();config['tested']=True;service._write(config)
             with patch('browser_agent.validate_url'),patch('browser_agent.fetch_robots',return_value='User-agent: *\nAllow: /'),patch.object(service,'complete',side_effect=lambda messages:json.dumps(decision.pop(0) if isinstance(decision,list) and len(decision)>1 else decision[0] if isinstance(decision,list) else decision)) as complete:
-                result=browser_agent.run_agent('https://fixture.example/','contacts',service,[],max_steps=8,browser_factory=FakeBrowser)
+                if chrome_snapshot is None:result=browser_agent.run_agent('https://fixture.example/','contacts',service,[],max_steps=8,browser_factory=FakeBrowser)
+                else:
+                    class Chrome(FakeBrowser):
+                        label='Chrome'
+                        def command(self,action):commands.append(dict(action,browser='Chrome'));return {'snapshot':chrome_snapshot}
+                    result=browser_agent.run_site('https://fixture.example/','contacts',service,[],moli_factory=FakeBrowser,chrome_factory=Chrome,chrome_ready=lambda:True)
                 return result,commands,complete.call_count
     def test_unchanged_same_control_not_clicked_repeatedly(self):
         s={'url':'https://fixture.example/','text':'公开正文'*100,'controls':[{'ref':'c0','label':'公告','aria':'通知'}],'images':[]}
@@ -92,6 +97,15 @@ class ReliabilityTests(unittest.TestCase):
         from collection_diagnostics import collection_diagnostics
         issues=collection_diagnostics({'warnings':['页面加载等待已达上限，可稍后继续检查'],'steps':[{'url':'https://fixture.example/old'}]},pages=[{'url':'https://fixture.example/new','loading_wait_exhausted':True}])
         self.assertEqual(len(issues),1);self.assertEqual(issues[0]['url'],'https://fixture.example/new')
+
+    def test_loading_exhaustion_still_uses_chrome_fallback(self):
+        moli={'url':'https://fixture.example/','text':'Loading...','controls':[],'images':[],'loading_pending':True,'render_weak':True}
+        chrome={'url':'https://fixture.example/','text':'商务邮箱 sales@fixture.example','controls':[],'images':[]}
+        answer={'contacts':[{'type':'email','value':'sales@fixture.example','source_url':'https://fixture.example/','evidence':'商务邮箱 sales@fixture.example'}],'action':{'type':'finish'}}
+        result,commands,calls=self.run_agent(moli,answer,chrome_snapshot=chrome)
+        self.assertEqual(result['contact_status'],'found');self.assertEqual(result['contacts'],{'email':['sales@fixture.example']})
+        self.assertTrue(any(c.get('browser')=='Chrome' for c in commands));self.assertEqual(calls,1)
+        self.assertLessEqual(sum(c['type']=='wait' and c.get('browser')!='Chrome' for c in commands),2)
 
     def test_author_and_closed_site_contacts_still_count_as_found(self):
         for kind in ['other','email']:

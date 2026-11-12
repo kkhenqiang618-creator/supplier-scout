@@ -426,7 +426,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                     transient=re.search(r'ERR_TIMED_OUT|ERR_CONNECTION_(?:RESET|CLOSED)|ERR_FAILED',str(error))
                     if attempt or not transient or current_deadline() is not None and current_deadline()-clock()<reserve+COMMAND_TIMEOUT:raise
                     warnings.append('首次访问暂时失败，自动重试一次：'+str(error)[:250]);log('首次访问暂时失败，自动重试（不消耗 Agent 步数）')
-            if escalate_weak and snapshot.get('render_weak') and not CONTACT_HINT.search(observed_text(snapshot)):
+            if escalate_weak and snapshot.get('render_weak') and not (snapshot.get('loading_pending') or snapshot.get('challenge')) and not CONTACT_HINT.search(observed_text(snapshot)):
                 log(label+' 首页渲染不完整，先等待页面加载（不调用模型）')
                 snapshot=browser.command({'type':'wait'})['snapshot']
                 steps.append({'step':0,'url':snapshot['url'],'action':'wait','reason':'首页渲染不完整，程序自动等待一次','contacts_found':0,'browser':label})
@@ -453,6 +453,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                         if message not in warnings:warnings.append(message)
                         # A stuck auxiliary spinner must not hide working navigation or already visible channels.
                         if snapshot.get('challenge') or not snapshot.get('controls') and not CONTACT_HINT.search(observed_text(snapshot)):
+                            snapshot=dict(snapshot,render_weak=True);weak.append(snapshot['url']);fallback['weak']=True
                             observations.append(snapshot);blocked=True;finished=True;break
                 observations.append(snapshot)
                 if isinstance(snapshot.get('http_status'),int) and snapshot['http_status']>=400:
