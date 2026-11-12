@@ -1,3 +1,5 @@
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +14,26 @@ class ModelServiceTests(unittest.TestCase):
             self.assertEqual(service.read()['base_url'],'https://example.com/v1')
             service.save({'base_url':'https://example.com/v1','model':'other-model','api_key':''})
             self.assertEqual(service.read()['api_key'],'a-test-secret')
-            self.assertEqual(service.path.stat().st_mode & 0o777,0o600)
+            if os.name!='nt':self.assertEqual(service.path.stat().st_mode & 0o777,0o600)
+            else:self.assertNotIn('a-test-secret',service.path.read_text())  # chmod is a no-op on Windows; DPAPI hides the value instead.
+
+@unittest.skipUnless(os.name=='nt','Windows DPAPI only')
+class WindowsKeyProtectionTests(unittest.TestCase):
+    def test_key_is_encrypted_at_rest_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as folder:
+            service=ModelService(Path(folder)/'provider.json')
+            service.save({'base_url':'https://example.com/v1','model':'m','api_key':'windows-secret'})
+            self.assertNotIn('windows-secret',service.path.read_text())
+            self.assertTrue(service.public()['key_protected']);self.assertTrue(service.public()['key_configured'])
+            self.assertEqual(service.read()['api_key'],'windows-secret')
+    def test_blob_from_another_machine_is_dropped_with_an_explanation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'provider.json'
+            path.write_text(json.dumps({'base_url':'https://example.com/v1','model':'m','api_key':'dpapi:bm90LWEtcmVhbC1ibG9i'}))
+            service=ModelService(path)
+            self.assertFalse(service.public()['key_configured']);self.assertIn('无法解密',service.public()['key_error'])
+            service.save({'base_url':'https://example.com/v1','model':'m','api_key':'fresh-key'})
+            self.assertEqual(service.read()['api_key'],'fresh-key')
 
 if __name__=='__main__':unittest.main()
 

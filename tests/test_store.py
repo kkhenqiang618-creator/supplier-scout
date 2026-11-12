@@ -48,4 +48,12 @@ class StoreTests(unittest.TestCase):
         store.import_rows([{'url':'https://example.com'}])
         self.assertEqual(sum(row['mode']=='real' for row in store.state()['suppliers']),1)
 
+class ConnectionLifetimeTests(unittest.TestCase):
+    @unittest.skipUnless(os.name=='nt','Windows refuses to replace or delete a file with an open handle')
+    def test_store_releases_the_database_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=os.path.join(folder,'scout.db');store=Store(path,seed=False)
+            store.import_rows([{'name':'甲','url':'https://example.com'}]);store.state()
+            os.replace(path,os.path.join(folder,'moved.db'))
+
 if __name__=='__main__': unittest.main()

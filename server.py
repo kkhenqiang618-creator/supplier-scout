@@ -3,6 +3,7 @@
 import argparse
 import base64
 import binascii
+import contextlib
 import csv
 import io
 import json
@@ -95,8 +96,21 @@ class Store:
             db.execute('INSERT OR IGNORE INTO settings VALUES(?,?)',('rules',encode(DEFAULT_RULES)))
             count=db.execute('SELECT count(*) FROM suppliers WHERE mode="demo"').fetchone()[0]
         if seed and not count: self.seed()
+    @contextlib.contextmanager
     def connect(self):
-        db=sqlite3.connect(self.path,timeout=20); db.row_factory=sqlite3.Row; return db
+        """One connection per unit of work, committed and closed even on error.
+
+        Windows refuses to delete or move a directory while a SQLite handle is
+        still open, so a leaked handle makes `data/` look "in use" after the app
+        exits and turns every temp-dir cleanup into a PermissionError.
+        """
+        db=sqlite3.connect(self.path,timeout=20); db.row_factory=sqlite3.Row
+        try:
+            yield db; db.commit()
+        except Exception:
+            db.rollback(); raise
+        finally:
+            db.close()
     def rules(self):
         with self.connect() as db: return json.loads(db.execute('SELECT value FROM settings WHERE key="rules"').fetchone()[0])
     def event(self,message,sid=None,mode='real'):
