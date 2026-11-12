@@ -80,8 +80,8 @@ class ModelService:
         if error:data['key_error']=error
         return data
     def public(self):
-        data=self.read()
-        return {'base_url':data.get('base_url',''),'model':data.get('model',''),'key_configured':bool(data.get('api_key')),'configured':bool(data.get('base_url') and data.get('model')),'tested':data.get('tested',False),'key_protected':bool(data.get('key_protected')),'key_error':data.get('key_error','')}
+        data=self.read();key_error=data.get('key_error','')
+        return {'base_url':data.get('base_url',''),'model':data.get('model',''),'key_configured':bool(data.get('api_key')),'configured':bool(data.get('base_url') and data.get('model')),'tested':bool(data.get('tested')) and not key_error,'key_protected':bool(data.get('key_protected')),'key_error':key_error}
     def save(self,data):
         url=str(data.get('base_url','')).strip().rstrip('/');model=str(data.get('model','')).strip();parts=urlsplit(url)
         if parts.scheme not in ['http','https'] or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment: raise ValueError('请填写模型服务的 API 地址，例如 https://服务域名/v1')
@@ -89,6 +89,7 @@ class ModelService:
         with self.lock:
             old=self.read();same_origin=origin(url)==origin(old.get('base_url',''))
             key=str(data.get('api_key','')).strip() or (old.get('api_key','') if same_origin else '')
+            if old.get('key_error') and not str(data.get('api_key','')).strip():raise ValueError(old['key_error']+'；请重新填写 API Key 后再保存')
             self._write({'base_url':api_base(url),'model':model,'api_key':key,'tested':False,'revision':uuid.uuid4().hex})
             return self.public()
     def models(self,config=None):
@@ -111,6 +112,7 @@ class ModelService:
                 delay=min(delay,RETRY_WAIT_CAP-waited);waited+=delay;time.sleep(delay)
     def _complete_once(self,messages,config=None):
         data=dict(config if config is not None else self.read())
+        if data.get('key_error'):raise ModelConfigError(data['key_error']+'；请重新填写 API Key 后再开始采集')
         if not data.get('base_url') or not data.get('model'): raise ModelConfigError('请先在模型服务设置中填写 API URL、模型名和密钥')
         endpoint=api_base(data['base_url']);endpoint=endpoint if endpoint.endswith('/chat/completions') else endpoint+'/chat/completions'
         headers={'Content-Type':'application/json'}
@@ -143,6 +145,7 @@ class ModelService:
             raise ModelConfigError('模型服务调用失败：'+message[:300])
     def test(self):
         config=self.read()
+        if config.get('key_error'):raise ModelConfigError(config['key_error']+'；请重新填写 API Key 后再测试')
         original_model=config.get('model')
         try:
             available=self.models(config)

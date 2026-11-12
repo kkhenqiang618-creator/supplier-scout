@@ -48,6 +48,13 @@ class StoreTests(unittest.TestCase):
         store.import_rows([{'url':'https://example.com'}])
         self.assertEqual(sum(row['mode']=='real' for row in store.state()['suppliers']),1)
 
+    def test_real_run_refuses_an_unreadable_saved_key(self):
+        import json
+        from pathlib import Path
+        Path(self.temp.name,'model-service.json').write_text(json.dumps({'base_url':'https://example.com/v1','model':'m','api_key':'dpapi:broken','tested':True}),encoding='utf-8')
+        with self.assertRaises(ValueError) as caught: self.store.start_job('real')
+        self.assertIn('无法解密',str(caught.exception))
+
 class ConnectionLifetimeTests(unittest.TestCase):
     @unittest.skipUnless(os.name=='nt','Windows refuses to replace or delete a file with an open handle')
     def test_store_releases_the_database_file(self):

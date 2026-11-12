@@ -219,14 +219,15 @@ class PostgresStore(Store):
     def busy_message(row,admin=False):
         """Name the occupant of the single cloud browser and its progress instead of a bare refusal.
 
-        The member's name is only shown to administrators, mirroring team_overview's
-        visibility rule; progress is aggregate and safe for every signed-in member.
+        Only administrators see the occupant's name and progress; other members just learn
+        that the shared browser is busy, so one member's workload is not visible to the team.
         """
-        if not row:return '云端浏览器正在执行其他批次，请稍后重试'
+        if not row or not admin:return '云端浏览器正在执行其他批次，请稍后重试'
         name=str(row.get('owner') or '').strip()
-        who='成员 '+name if admin and name else '其他成员'
+        if not name:return '云端浏览器正在执行其他批次，请稍后重试'
         total=int(row.get('total') or 0);done=int(row.get('position') or 0)
         progress='，已完成 %d/%d 家'%(done,total) if total else ''
+        return '云端浏览器同一时间只执行一个批次：成员 '+name+'正在采集'+progress+'，请稍后重试或等该批次结束后继续'
         return '云端浏览器同一时间只执行一个批次：'+who+'正在采集'+progress+'，请稍后重试或等该批次结束后继续'
     def _busy_message(self):
         """The insert collides with the global one-active-batch index, which RLS hides from the caller's pre-check."""

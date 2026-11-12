@@ -210,7 +210,9 @@ class Store:
         if mode not in ['real','demo']: raise ValueError('数据模式错误')
         if scope not in ['all','contacts'] or selection not in ['remaining','all']: raise ValueError('采集模式或范围无效')
         if mode=='real':
-            if not self.model_service.public()['configured']: raise ValueError('请先在模型服务设置中填写 API URL、模型名和 API Key')
+            service=self.model_service.public()
+            if service.get('key_error'): raise ValueError(service['key_error']+'；请重新填写后再开始采集')
+            if not service['configured']: raise ValueError('请先在模型服务设置中填写 API URL、模型名和 API Key')
             from browser_agent import runtime_paths
             runtime_paths()
         if not self.job_lock.acquire(blocking=False): raise ValueError('已有批次运行，请等待完成')

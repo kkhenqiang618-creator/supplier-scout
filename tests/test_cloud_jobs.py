@@ -175,8 +175,11 @@ class CloudJobResilienceTests(unittest.TestCase):
         admin=PostgresStore.busy_message(row,True)
         self.assertIn('成员 小姜',admin);self.assertIn('12/40',admin)
         member=PostgresStore.busy_message(row,False)
-        self.assertNotIn('小姜',member);self.assertIn('其他成员',member);self.assertIn('12/40',member)
+        self.assertEqual(member,'云端浏览器正在执行其他批次，请稍后重试')
+        self.assertNotIn('小姜',member);self.assertNotIn('12/40',member);self.assertNotIn('其他成员',member)
         self.assertIn('其他批次',PostgresStore.busy_message(None,True))
+        unnamed={'owner':'','position':3,'total':9}
+        self.assertEqual(PostgresStore.busy_message(unnamed,True),'云端浏览器正在执行其他批次，请稍后重试')
     def test_start_job_collision_reports_the_occupant(self):
         import psycopg
         store,_=self.scripted_store(None)

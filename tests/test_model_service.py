@@ -123,3 +123,34 @@ class ProviderBoundaryTests(unittest.TestCase):
         finally:
             for item in [server,destination]:item.shutdown();item.server_close()
             for thread in threads:thread.join()
+
+
+class UnreadableKeyTests(unittest.TestCase):
+    """A blob that cannot be decrypted must stop requests instead of failing at auth."""
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.path=Path(self.temp.name)/'provider.json'
+        self.path.write_text(json.dumps({'base_url':'https://example.com/v1','model':'my-model','api_key':'dpapi:not-a-real-blob','tested':True}),encoding='utf-8')
+    def tearDown(self): self.temp.cleanup()
+    def test_broken_key_hides_the_past_success_and_blocks_requests(self):
+        from model_service import ModelConfigError
+        service=ModelService(self.path)
+        public=service.public()
+        self.assertFalse(public['tested']);self.assertFalse(public['key_configured'])
+        self.assertIn('\u65e0\u6cd5\u89e3\u5bc6',public['key_error'])
+        with self.assertRaises(ModelConfigError) as caught: service.complete([{'role':'user','content':'ping'}])
+        self.assertIn('\u65e0\u6cd5\u89e3\u5bc6',str(caught.exception))
+    def test_blank_save_is_refused_instead_of_dropping_the_blob(self):
+        service=ModelService(self.path)
+        with self.assertRaises(ValueError) as caught: service.save({'base_url':'https://example.com/v1','model':'my-model','api_key':''})
+        self.assertIn('\u91cd\u65b0\u586b\u5199',str(caught.exception))
+    def test_a_new_key_restores_configuration_and_requires_retest(self):
+        service=ModelService(self.path)
+        result=service.save({'base_url':'https://example.com/v1','model':'my-model','api_key':'new-secret'})
+        self.assertTrue(result['key_configured']);self.assertEqual(result['key_error'],'');self.assertFalse(result['tested'])
+        self.assertEqual(service.read()['api_key'],'new-secret')
+    def test_connection_test_reports_the_broken_key_instead_of_auth_failure(self):
+        from model_service import ModelConfigError
+        service=ModelService(self.path)
+        with self.assertRaises(ModelConfigError) as caught: service.test()
+        self.assertIn('无法解密',str(caught.exception))
