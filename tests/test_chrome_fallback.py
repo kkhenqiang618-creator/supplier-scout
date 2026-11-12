@@ -108,9 +108,10 @@ class FallbackPolicyTests(Harness):
         found_and_continue = json.dumps({'action': {'type': 'wait'}, 'contacts': [EMAIL]})
         with patch('model_service.time.sleep'):
             result, events, _ = self.site([WEAK], [GOOD], [found_and_continue] + [ModelTransientError('503')] * 6)
-        self.assertNotIsInstance(result, Exception)
+        self.assertIsInstance(result, ModelTransientSiteError)
+        result=result.partial
         self.assertEqual(events.count(('start', 'Chrome')), 1)
-        self.assertEqual(result['contact_status'], 'found'); self.assertEqual([r['value'] for r in result['contact_records']], ['sales@example.com'])
+        self.assertEqual(result['contact_status'], 'incomplete'); self.assertEqual([r['value'] for r in result['contact_records']], ['sales@example.com'])
         self.assertEqual(result['contact_records'][0]['browser'], 'Chrome')
         self.assertTrue(any(w.startswith('Chrome 备用浏览器未完成') for w in result['warnings'])); self.assertNotIn('_fallback', result)
 
@@ -155,10 +156,13 @@ class FallbackFailureTests(Harness):
         result, events, calls = self.site([tiny], [GOOD], [wx], chrome_fail=ValueError('Chrome 浏览器启动失败'))
         self.assertEqual(len(calls), 1); self.assertEqual(result['contact_status'], 'found'); self.assertEqual(result['contacts'], {'wechat': ['biz_wx_777']})
 
-    def test_chrome_model_transient_keeps_moli_result(self):
+    def test_chrome_model_transient_propagates_with_moli_evidence(self):
         result, _, _ = self.site([PLAIN, WEAK], [GOOD], [json.dumps({'contacts': [], 'action': {'type': 'wait'}}), FINISH, ModelTransientError('503')])
-        self.assertIsInstance(result, dict); self.assertEqual(result['contact_status'], 'incomplete'); self.assertTrue(any(w.startswith('Chrome 备用浏览器未完成') for w in result['warnings']))
-        self.assertNotIn('model_transient', result)
+        self.assertIsInstance(result, ModelTransientSiteError)
+        self.assertEqual(result.partial['contact_status'], 'incomplete')
+        self.assertTrue(result.partial['model_transient'])
+        self.assertIn('Moli 浏览器 Agent', [source['method'] for source in result.partial['sources']])
+        self.assertTrue(any(w.startswith('Chrome 备用浏览器未完成') for w in result.partial['warnings']))
 
     def test_chrome_service_error_raises_with_merged_partial(self):
         moli_page = {'url': URL, 'text': '正文' * 100, 'controls': [], 'images': []}

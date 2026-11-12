@@ -169,7 +169,8 @@ class Browser:
         binary,module=runtime_paths();network=['--block-cidrs',LOOPBACK_TEST_BLOCK_CIDRS] if allow_loopback_for_tests is True else ['--block-private-networks'];sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
         self.folder=Path(folder);self.stderr=(self.folder/'browser.log').open('w');self.worker=None;self.server=None
         try:
-            self.server=subprocess.Popen([binary,'serve','--port',str(port),'--layout','--image',*network,'--http-timeout','15000','--http-connect-timeout','5000','--timeout','25'],stdout=self.stderr,stderr=self.stderr)
+            try:self.server=subprocess.Popen([binary,'serve','--port',str(port),'--layout','--image',*network,'--http-timeout','15000','--http-connect-timeout','5000','--timeout','25'],stdout=self.stderr,stderr=self.stderr)
+            except OSError as error:raise BrowserRuntimeError('Moli 浏览器进程无法启动（后台运行环境异常），批次已停止：'+str(error)[:200]) from error
             endpoint='http://127.0.0.1:'+str(port)
             deadline=time.monotonic()+12
             while True:
@@ -182,7 +183,8 @@ class Browser:
         except Exception:self.close();raise
     def _spawn(self,module,argv):
         """Start the shared Node worker (agent_browser.cjs) and wait for its ready line, so a launch failure surfaces here, not on the first command."""
-        self.worker=subprocess.Popen(['node',str(ROOT/'agent_browser.cjs'),*argv],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.stderr,text=True,encoding='utf-8',env=dict(os.environ,SCOUT_PLAYWRIGHT_MODULE=module),bufsize=1)
+        try:self.worker=subprocess.Popen(['node',str(ROOT/'agent_browser.cjs'),*argv],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.stderr,text=True,encoding='utf-8',env=dict(os.environ,SCOUT_PLAYWRIGHT_MODULE=module),bufsize=1)
+        except OSError as error:raise BrowserRuntimeError(self.label+' 浏览器进程无法启动（后台运行环境异常），批次已停止：'+str(error)[:200]) from error
         self.replies=queue.Queue();threading.Thread(target=self._read,args=(self.worker.stdout,self.replies),daemon=True).start()
         try:line=self.replies.get(timeout=READY_TIMEOUT)
         except queue.Empty:line=''
@@ -607,7 +609,10 @@ def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browse
             log('Chrome 未能读取页面，回到 Moli 继续检查')
             try:again=moli_run(False)
             except AgentServiceError as error:strip_internal(getattr(error,'partial',None));raise
-            except ModelTransientSiteError as error:return only_moli(result,warning+'；'+str(error)[:200])
+            except ModelTransientSiteError as error:
+                strip_internal(error.partial)
+                if error.partial is not None:error.partial['warnings'].append(warning)
+                raise
             return only_moli(again,warning)
         return only_moli(result,warning)
     try:moli=moli_run(enabled)
@@ -618,10 +623,14 @@ def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browse
     log('Moli 未能完整读取页面，改用 Chrome 备用浏览器重试')
     try:chrome=run_agent(url,scope,service,rules,log,browser_factory=chrome_factory,deadline=site_end,clock=clock,extended_deadline=extended_end)
     except ModelTransientSiteError as error:
-        # Model failed mid-Chrome-run: keep the contacts Chrome already verified (error.partial), merged with Moli's.
+        # Keep evidence, but preserve the failure signal so the batch counts outages and can retry this site.
         partial=strip_internal(error.partial or {})
-        if not partial.get('contact_records') and not partial.get('sources'):return only_moli(moli,'Chrome 备用浏览器未完成：'+str(error)[:300])
-        merged=merge_results(strip_internal(moli),partial);merged['warnings'].append('Chrome 备用浏览器未完成：'+str(error)[:300]);return merged
+        merged=merge_results(strip_internal(moli),partial)
+        if merged['contact_records']:merged['contact_status']='incomplete'
+        merged.update(model_transient=True,contact_summary=MODEL_TRANSIENT_SUMMARY)
+        merged['warnings'].append('Chrome 备用浏览器未完成：'+str(error)[:300])
+        error.partial=merged
+        raise
     except AgentServiceError as error:
         error.partial=merge_results(strip_internal(moli),strip_internal(error.partial or {}));raise
     except BrowserRuntimeError as error:
