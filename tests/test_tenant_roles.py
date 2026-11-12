@@ -26,6 +26,8 @@ class TenantRoleTests(unittest.TestCase):
    auth=AuthManager.from_env(required=True,secure_cookie=False)
    class Shared(PostgresStore):
     def state(self,full=True):return {'username':self.username,'is_admin':self.is_admin,'suppliers':[{'id':1 if self.username=='小姜' else 2,'name':self.username}], 'model_service':{'base_url':'private-provider'},'integrations':{'llm':True}}
+    @property
+    def job(self):return {'running':False}
     def team_overview(self,names):return {'members':[{'username':name} for name in names]}
     def get(self,sid):
      if sid!=(1 if self.username=='小姜' else 2):raise ValueError('供应商不存在')
@@ -47,4 +49,6 @@ class TenantRoleTests(unittest.TestCase):
      self.assertEqual(report[0],200);self.assertEqual(report[2]['suppliers'][0]['id'],2);self.assertNotIn('model_service',report[2]);self.assertNotIn('private-provider',json.dumps(report[2]))
      self.assertEqual(req('/api/admin/member?username=unknown',a)[0],404)
      self.assertEqual(req('/api/supplier?id=1&username=%E5%B0%8F%E5%A7%9C',b)[0],404)
+     self.assertEqual(req('/api/supplier-entry',data={'id':1,'url':'https://example.com','expected_url':'https://old.example','evidence':'fixture'})[0],401)
+     self.assertEqual(req('/api/supplier-entry',b,data={'id':1,'url':'https://example.com','expected_url':'https://old.example','evidence':'fixture','username':'小姜'})[0],400)
     finally:server.shutdown();server.server_close()

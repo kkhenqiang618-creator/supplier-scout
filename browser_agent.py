@@ -22,6 +22,7 @@ from pathlib import Path
 from model_service import ModelService,ModelConfigError,ModelTransientError
 from engine import validate_url,is_public_ip
 from collection_diagnostics import collection_diagnostics
+from entry_recovery import migration_candidates,verified_destination,canonical_url
 
 ROOT=Path(__file__).resolve().parent
 CONTACT_TYPES={'email','phone','wechat','qq','qq_group','wechat_link','official_account','telegram','discord','contact_form','online_service','qrcode','other'}
@@ -379,7 +380,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
         try:service.test()
         except ModelTransientError as error:raise ModelTransientSiteError(MODEL_TRANSIENT_SUMMARY+'：'+str(error),{'contacts':{},'contact_records':[],'contact_status':'incomplete','contact_summary':MODEL_TRANSIENT_SUMMARY,'sources':[],'steps':[],'warnings':[str(error)],'offers':[],'scope':scope,'model_transient':True})
         except ValueError as error:raise AgentServiceError(str(error))
-    policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False;weak=[];fallback={'weak':False,'dead':False,'escalated':False};unreadable={};extended=False;robots_refused=False;action_attempts={};repeat_refusals=0;loading_waits={}
+    policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False;weak=[];fallback={'weak':False,'dead':False,'escalated':False};unreadable={};extended=False;robots_refused=False;action_attempts={};repeat_refusals=0;loading_waits={};entry_recovery={};entry_attempts=set();migration_hops=0;pending_entry=None;migration_origins=set()
     label=getattr(browser_factory,'label','Moli');method=label+' 浏览器 Agent'
     def current_deadline():
         if weak_deadline is not None and fallback['weak'] and not records:return weak_deadline
@@ -398,6 +399,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
         # render_weak: Moli rendered too little; never let it read as "no contacts". blocked/incomplete keep the site in '继续未完成' (future Chrome fallback hook).
         payload={'contacts':contacts,'contact_records':records,'contact_status':choose_contact_status(records,blocked or site_weak,len(steps)),'contact_summary':('已找到 '+str(len(records))+' 条联系线索，按用途确认后跟进' if records else RENDER_WEAK_SUMMARY if site_weak else '访问受阻，不能判定网站没有联系方式' if blocked else '本次检查范围尚未发现可核实联系方式，需继续查找'),**({'render_weak':True} if site_weak else {}),'sources':[{'url':s['url'],'method':method,'excerpt':observed_text(s)[:35000],'text_length':len(observed_text(s))} for s in observations],'steps':steps,'warnings':list(dict.fromkeys(warnings)),'offers':offers if scope=='all' else [],'scope':scope,'_fallback':dict(fallback)}
         payload['diagnostics']=collection_diagnostics(payload,observations,url)
+        if entry_recovery:payload['entry_recovery']=dict(entry_recovery)
         for issue in payload['diagnostics']:issue['browser']=issue.get('browser') or label
         return payload
     def allow(target):
@@ -426,6 +428,8 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                     transient=re.search(r'ERR_TIMED_OUT|ERR_CONNECTION_(?:RESET|CLOSED)|ERR_FAILED',str(error))
                     if attempt or not transient or current_deadline() is not None and current_deadline()-clock()<reserve+COMMAND_TIMEOUT:raise
                     warnings.append('首次访问暂时失败，自动重试一次：'+str(error)[:250]);log('首次访问暂时失败，自动重试（不消耗 Agent 步数）')
+            origin=lambda value:(urllib.parse.urlsplit(value).scheme,urllib.parse.urlsplit(value).netloc.lower())
+            migration_origins.update([origin(url),origin(snapshot['url'])])
             if escalate_weak and snapshot.get('render_weak') and not (snapshot.get('loading_pending') or snapshot.get('challenge')) and not CONTACT_HINT.search(observed_text(snapshot)):
                 log(label+' 首页渲染不完整，先等待页面加载（不调用模型）')
                 snapshot=browser.command({'type':'wait'})['snapshot']
@@ -437,6 +441,36 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                     if index!=max_steps or not can_extend():break
                     extended=True;cap=max_steps+extra;notice=label+' 前 '+str(max_steps)+' 步未找到联系方式，继续查找最多 '+str(extra)+' 步（共 '+str(cap)+' 步）'
                     log(notice);warnings.append(notice)
+                # Deterministic routing follows only an explicit, unique migration notice.
+                while migration_hops<2:
+                    if origin(snapshot['url']) not in migration_origins:break
+                    candidates=migration_candidates(snapshot)
+                    if len(candidates)>1:
+                        warnings.append('升级公告包含多个新入口，需人工核验当前网址');break
+                    if not candidates:break
+                    candidate=candidates[0];target=candidate['url'];key=canonical_url(target)
+                    if key in entry_attempts or key==canonical_url(url):
+                        warnings.append('新旧入口形成循环，已停止自动跳转，需核验网址');break
+                    if current_deadline() is not None and current_deadline()-clock()<reserve+COMMAND_TIMEOUT:break
+                    notice=snapshot;observations.append(notice);entry_attempts.add(key);migration_hops+=1
+                    try:
+                        allow(target);pending_entry=candidate;migration_origins.add(origin(target));log('官网升级公告提供新入口，验证后继续：'+target)
+                        snapshot=browser.command({'type':'open','url':target})['snapshot']
+                        # Keep the current observation even on failure; never act on stale refs from the notice.
+                        if verified_destination(snapshot,target):
+                            entry_recovery={'from':url,'to':snapshot['url'],'source_url':candidate['source_url'],'evidence':candidate['evidence'],'verified':True,'method':'official_notice'}
+                            log('新入口已验证，继续采集：'+snapshot['url'])
+                            warnings.append('已核验官网升级入口：'+url+' → '+snapshot['url'])
+                        elif not migration_candidates(snapshot):warnings.append('新入口尚未通过可读性核验，不能自动更新网址')
+                    except BrowserDeadError:raise
+                    except Exception as error:
+                        pending_entry=None;warnings.append('新入口验证失败：'+str(error)[:250]);blocked=True
+                        # Failed navigation may have invalidated the old DOM. Restore it before any model action.
+                        try:snapshot=browser.command({'type':'open','url':notice['url']})['snapshot']
+                        except BrowserDeadError:raise
+                        except Exception:finished=True
+                        break
+                if finished:break
                 # Loading belongs to the current observation, not another paid model step.
                 if snapshot.get('loading_pending') or snapshot.get('challenge'):
                     load_key=(snapshot['url'],observed_text(snapshot));wait_count=loading_waits.get(load_key,0)
@@ -455,6 +489,8 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                         if snapshot.get('challenge') or not snapshot.get('controls') and not CONTACT_HINT.search(observed_text(snapshot)):
                             snapshot=dict(snapshot,render_weak=True);weak.append(snapshot['url']);fallback['weak']=True
                             observations.append(snapshot);blocked=True;finished=True;break
+                if pending_entry and verified_destination(snapshot,pending_entry['url']):
+                    entry_recovery={'from':url,'to':snapshot['url'],'source_url':pending_entry['source_url'],'evidence':pending_entry['evidence'],'verified':True,'method':'official_notice'}
                 observations.append(snapshot)
                 if isinstance(snapshot.get('http_status'),int) and snapshot['http_status']>=400:
                     warnings.append('网站返回 HTTP '+str(snapshot['http_status'])+'：'+snapshot['url'])
@@ -574,7 +610,10 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
             raise
         except BrowserDeadError as error:fallback['dead']=True;blocked=True;warnings.append(str(error)[:400]);log('访问受阻：'+str(error)[:200])
         except BrowserRuntimeError:raise
-        except Exception as error:blocked=True;warnings.append(str(error)[:400]);log('访问受阻：'+str(error)[:200])
+        except Exception as error:
+            blocked=True;warnings.append(str(error)[:400]);log('访问受阻：'+str(error)[:200])
+            if re.search(r'ERR_(?:TIMED_OUT|CONNECTION_|TUNNEL_CONNECTION_FAILED|FAILED)',str(error)):
+                fallback['weak']=True;warnings.append('旧入口连接失败，若网站已更换域名，请核验并更新网址')
         finally:
             if browser:browser.close()
     return result()
@@ -639,7 +678,7 @@ def merge_results(moli,chrome):
     else:status='blocked';summary=BOTH_WEAK_SUMMARY if both_weak else '访问受阻，不能判定网站没有联系方式'
     return {'contacts':contacts,'contact_records':records,'contact_status':status,'contact_summary':summary,**({'render_weak':True} if both_weak else {}),
         'sources':list(moli.get('sources',[]))+list(chrome.get('sources',[])),'steps':steps,'warnings':list(dict.fromkeys([CHROME_RETRIED if chrome_ok and w.startswith(RENDER_WEAK_WARNING) else w for w in moli.get('warnings',[])]+list(chrome.get('warnings',[])))),
-        'offers':offers,'scope':moli.get('scope') or chrome.get('scope'),'diagnostics':list(moli.get('diagnostics',[]))+list(chrome.get('diagnostics',[]))}
+        'offers':offers,'scope':moli.get('scope') or chrome.get('scope'),'diagnostics':list(moli.get('diagnostics',[]))+list(chrome.get('diagnostics',[])),**({'entry_recovery':chrome.get('entry_recovery') or moli.get('entry_recovery')} if chrome.get('entry_recovery') or moli.get('entry_recovery') else {})}
 def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browser,chrome_factory=ChromeBrowser,clock=time.monotonic,chrome_ready=chrome_available):
     """Moli first; at most one Chrome retry (started only after Moli's browser is closed by run_agent's finally).
     Moli keeps the whole budget unless a page turns weak with nothing found; then it stops at the scope's Moli budget to leave Chrome its time.

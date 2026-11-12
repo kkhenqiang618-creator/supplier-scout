@@ -8,6 +8,7 @@ import unittest
 import urllib.error
 import urllib.request
 from server import create_server
+from unittest.mock import patch
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -50,6 +51,18 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(partial[0],200)
         self.assertEqual(json.loads(partial[2])['added'],1)
         self.assertEqual(len(json.loads(partial[2])['rejected']),1)
+
+    def test_entry_update_is_scoped_validated_and_preserves_existing_contacts(self):
+        self.call('/api/import',{'rows':[{'name':'7','url':'https://old.example'}]});row=self.app.store.state()['suppliers'][0]
+        self.app.store.save_contacts(row['id'],{'contacts':{'email':['sales@old.example']},'contact_status':'found'})
+        body={'id':row['id'],'url':'https://new.example/','expected_url':row['url'],'evidence':'用户核验官网域名升级','source_url':'https://old.example'}
+        with patch('entry_recovery.validate_url'):
+            code,_,raw=self.call('/api/supplier-entry',body)
+            self.assertEqual(code,200);updated=json.loads(raw);self.assertEqual(updated['url'],'https://new.example/');self.assertEqual(updated['contacts']['email'],['sales@old.example'])
+            self.assertEqual(self.call('/api/supplier-entry',body)[0],400)
+            self.assertEqual(self.call('/api/supplier-entry',dict(body,id=99999))[0],400)
+            self.assertEqual(self.call('/api/supplier-entry',dict(body,expected_url='https://new.example/',url='https://127.0.0.1/'))[0],400)
+        self.assertEqual(self.call('/api/supplier-entry',body,origin='https://evil.example')[0],403)
 
     def test_stop_endpoint_is_idempotent_when_idle(self):
         for _ in range(2):

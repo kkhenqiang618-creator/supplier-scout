@@ -57,3 +57,8 @@ test('contact collection reasons distinguish old errors and preserve found chann
  assert.match(W.collectionReason(fresh),/HTTP 404/);
  assert.match(W.collectionReason({...old,contact_status:'found',contact_result:{contact_summary:'找到作者渠道'}}),/找到作者渠道/);
 });
+test('recovered entry summary retains original and current addresses',()=>{
+ const row={url:'https://new.example/',contact_result:{entry_history:[{from:'https://old.example/',to:'https://new.example/',method:'manual'}]}};
+ assert.match(W.entrySummary(row),/old\.example/);assert.match(W.entrySummary(row),/new\.example/);
+ assert.equal(W.entrySummary({url:'https://unchanged.example'}),'');
+});

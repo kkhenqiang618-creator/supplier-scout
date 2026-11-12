@@ -155,6 +155,7 @@ class PostgresStore(Store):
                 if key not in known:sources.append(item);known.add(key)
             return Store.save_result(self,sid,dict(result,contacts=contacts,sources=sources))
     def save_contacts(self,*args,**kwargs):return self._write(Store.save_contacts,*args,**kwargs)
+    def update_entry(self,*args,**kwargs):return self._write(Store.update_entry,*args,**kwargs)
     def review(self,*args,**kwargs):return self._write(Store.review,*args,**kwargs)
     def save_followup(self,*args,**kwargs):return self._write(Store.save_followup,*args,**kwargs)
     def save_draft(self,*args,**kwargs):return self._write(Store.save_draft,*args,**kwargs)
@@ -194,7 +195,7 @@ class PostgresStore(Store):
                     jsonb_array_length(offers::jsonb) AS offer_count,
                     jsonb_path_query_array(offers::jsonb,'$[*].model') AS offer_models,
                     COALESCE((SELECT bool_or(item->>'status'='review' OR COALESCE(item->>'ratio','')='') FROM jsonb_array_elements(offers::jsonb) item),false) AS needs_price_review,
-                    jsonb_build_object('contact_records',COALESCE(contact_result::jsonb->'contact_records','[]'::jsonb),'contact_summary',contact_result::jsonb->'contact_summary','scope',contact_result::jsonb->'scope','warnings',COALESCE(contact_result::jsonb->'warnings','[]'::jsonb),'diagnostics',COALESCE(contact_result::jsonb->'diagnostics','[]'::jsonb))::text AS contact_result
+                    jsonb_build_object('contact_records',COALESCE(contact_result::jsonb->'contact_records','[]'::jsonb),'contact_summary',contact_result::jsonb->'contact_summary','scope',contact_result::jsonb->'scope','warnings',COALESCE(contact_result::jsonb->'warnings','[]'::jsonb),'diagnostics',COALESCE(contact_result::jsonb->'diagnostics','[]'::jsonb),'entry_history',COALESCE(contact_result::jsonb->'entry_history','[]'::jsonb),'entry_recovery',contact_result::jsonb->'entry_recovery')::text AS contact_result
                     FROM suppliers ORDER BY id"""
                 suppliers=[self.decode_row(row) for row in db.execute(projection)]
                 for row in suppliers:row['_summary']=True

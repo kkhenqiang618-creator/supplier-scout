@@ -1,4 +1,5 @@
 from collection_diagnostics import collection_diagnostics
+from entry_recovery import validate_entry_url,canonical_url
 #!/usr/bin/env python3
 """Supplier Scout local workspace. No runtime dependencies. No outbound messaging."""
 import argparse
@@ -231,9 +232,45 @@ class Store:
             db.execute('UPDATE suppliers SET status=?,reason=?,contacts=?,offers=?,sources=?,warnings=?,checked_at=? WHERE id=?',(status,reason,encode(contacts),encode(offers),encode(result.get('sources',[])),encode(result.get('warnings',[])),now(),sid))
             if offers: db.execute('INSERT INTO history(supplier_id,mode,offers,created_at) VALUES(?,?,?,?)',(sid,row['mode'],encode(offers),now()))
         self.event('完成分析：'+row['name']+' · '+reason,sid,row['mode'])
+    def _entry_values(self,row,url,evidence,source_url,expected_url,method='manual'):
+        target=validate_entry_url(url)
+        if not isinstance(evidence,str) or not evidence.strip() or len(evidence)>3000:raise ValueError('请填写已核验新网址的依据（1–3000字）')
+        if source_url:validate_entry_url(source_url)
+        if not isinstance(expected_url,str) or canonical_url(expected_url)!=canonical_url(row['url']):raise ValueError('网址已变更，请刷新后重试')
+        if canonical_url(row['url'])==target:raise ValueError('新旧网址相同，无需更新')
+        with self.connect() as db:
+            for other in db.execute('SELECT id,url FROM suppliers WHERE mode=?',(row['mode'],)):
+                if other['id']!=row['id'] and canonical_url(other['url'])==target:raise ValueError('该网址已在你的名单中，请核对已有记录；未合并或删除数据')
+        detail=dict(row['contact_result']);history=list(detail.get('entry_history') or [])
+        history.append({'from':row['url'],'to':target,'source_url':source_url or '', 'evidence':evidence.strip(),'method':method,'checked_at':now()})
+        detail['entry_history']=history[-30:]
+        return target,detail
+    def _apply_entry(self,sid,url,evidence,source_url,expected_url,method='manual'):
+        row=self.get(sid);target,detail=self._entry_values(row,url,evidence,source_url,expected_url,method)
+        with self.connect() as db:db.execute('UPDATE suppliers SET url=?,contact_result=? WHERE id=?',(target,encode(detail),sid))
+        self.event('网址已核验更新：'+row['url']+' → '+target,sid,row['mode'])
+        return self.get(sid)
+    def update_entry(self,sid,url,evidence,source_url='',expected_url=None):
+        # The local batch owns job_lock for its whole lifetime; reject a URL edit during collection.
+        job_lock=getattr(self,'job_lock',None)
+        if job_lock is not None and not job_lock.acquire(blocking=False):raise ValueError('采集运行中，请完成或停止后再更新网址')
+        try:
+            with self.lock:
+                if self.job.get('running'):raise ValueError('采集运行中，请完成或停止后再更新网址')
+                return self._apply_entry(sid,url,evidence,source_url,expected_url)
+        finally:
+            if job_lock is not None:job_lock.release()
     def save_contacts(self,sid,result):
         with self.lock:
-            row=self.get(sid); contacts={key:list(value) for key,value in row['contacts'].items()}
+            row=self.get(sid);original_url=row['url'];target_url=original_url
+            recovery=result.get('entry_recovery') or {}
+            if recovery.get('verified') is True:
+                try:
+                    target_url,entry_detail=self._entry_values(row,recovery.get('to'),recovery.get('evidence'),recovery.get('source_url',''),recovery.get('from'),method='official_notice')
+                    row=dict(row,contact_result=entry_detail)
+                except ValueError as error:
+                    result=dict(result,warnings=list(result.get('warnings') or [])+['新入口未自动写入：'+str(error)])
+            contacts={key:list(value) for key,value in row['contacts'].items()}
             for kind,values in result.get('contacts',{}).items():
                 existing={str(value).lower() for value in contacts.get(kind,[])}
                 for value in values:
@@ -246,14 +283,16 @@ class Store:
                     sources.append(entry);known.add((entry.get('url'),entry.get('excerpt')))
             current=result.get('contact_status','incomplete')
             if not result.get('contacts') and any(row['contacts'].values()):current='needs_review'
-            detail={key:result.get(key) for key in ['contact_records','contact_summary','steps','warnings','scope','diagnostics']}
+            detail={key:result.get(key) for key in ['contact_records','contact_summary','steps','warnings','scope','diagnostics','entry_recovery']}
             for key in ['contact_records','steps','warnings']:detail[key]=detail[key] or []
+            detail['entry_history']=list(row['contact_result'].get('entry_history') or [])
             detail['diagnostics']=result.get('diagnostics') or collection_diagnostics(result,fallback_url=row['url'])
             for record in detail['contact_records']:record.setdefault('checked_at',now())
             previous=(row['contact_result'].get('previous_contact_records') or [])+(row['contact_result'].get('contact_records') or [])
             detail['previous_contact_records']=list({(r.get('type'),r.get('value'),r.get('source_url'),r.get('evidence')):r for r in previous}.values())
             with self.connect() as db:
-                db.execute('UPDATE suppliers SET contacts=?,sources=?,contact_status=?,contact_checked_at=?,contact_result=? WHERE id=?',(encode(contacts),encode(sources),current,now(),encode(detail),sid))
+                db.execute('UPDATE suppliers SET url=?,contacts=?,sources=?,contact_status=?,contact_checked_at=?,contact_result=? WHERE id=?',(target_url,encode(contacts),encode(sources),current,now(),encode(detail),sid))
+            if target_url!=original_url:self.event('官网升级入口已验证：'+original_url+' → '+target_url,sid,row['mode'])
             self.event('联系方式检查：'+row['name']+' · '+str(result.get('contact_summary') or current),sid,row['mode'])
     def review(self,sid,status,note):
         if status not in ['qualified','review','skipped'] or not str(note).strip(): raise ValueError('请选择结果并填写复核依据')
@@ -477,6 +516,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path=='/api/model-service/test': result=store.model_service.test()
             elif path=='/api/stop': result=store.stop_job()
             elif path=='/api/run': result=store.start_job(data.get('mode'),data.get('ids'),data.get('scope','all'),data.get('selection','remaining'))
+            elif path=='/api/supplier-entry': result=store.update_entry(int(data['id']),data.get('url'),data.get('evidence'),data.get('source_url',''),data.get('expected_url'))
             elif path=='/api/review': store.review(int(data['id']),data['status'],data['note']); result={'ok':True}
             elif path=='/api/rules': store.update_rules(data['rules']); result={'ok':True}
             elif path=='/api/followup': result=store.save_followup(int(data['id']),data['status'],data['note'])
