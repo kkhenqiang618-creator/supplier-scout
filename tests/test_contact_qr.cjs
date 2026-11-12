@@ -4,7 +4,7 @@ const nodes=new Map(),node=id=>{if(!nodes.has(id))nodes.set(id,{id,innerHTML:'',
 const state={deployment:'local',suppliers:[],rules:[],events:[],history:[],drafts:[],job:{status:'idle',running:false,mode:'real',total:0,done:0},model_service:{}};
 const context=vm.createContext({URLSearchParams,URL,console,document:{querySelector:node,addEventListener(){},activeElement:{}},window:{scrollTo(){}},location:{search:'',pathname:'/',hostname:'127.0.0.1',assign(){}},localStorage:{getItem(){return null},setItem(){}},setTimeout(){},clearTimeout(){},setInterval(){},fetch:async()=>({status:200,ok:true,json:async()=>state})});
 vm.runInContext(read('vendor/qrcode.js'),context);vm.runInContext(read('app.js'),context);
-const {qrSvg,qrEligible,qrButton,qrModalHTML,contactBadge}=context;
+const {qrSvg,qrEligible,qrButton,qrModalHTML,contactBadge,qrImageOnly,qrImageModalHTML}=context;
 const wecom='https://work.weixin.qq.com/ca/cawcde1234567890abcdef?customer_channel=site&x=<b>';
 const ok=qrSvg(wecom);assert.equal(ok.ok,true);assert.match(ok.svg,/^<svg[^>]*viewBox="0 0 \d+ \d+"/);assert.match(ok.svg,/<path d="M/);assert(!ok.svg.includes('<b>'));
 for(const bad of ['javascript:alert(1)','JavaScript://%0aalert(1)','data:text/html,<script>x</script>','vbscript:x','  javascript:https://a.com','ftp://a.com/x','https://a.com/x y'])assert.equal(qrSvg(bad).ok,false,bad);
@@ -22,4 +22,12 @@ for(const result of [undefined,{},{contact_summary:'Cloudflare 拦截',contact_r
 const stageOf=(status,contacts={})=>context.followupStages({contact_status:status,contacts,offers:[],status:'pending',reason:''}).find(stage=>stage.key==='todo_contact');
 assert.equal(stageOf('not_started').label,'未开始 · 待采集');assert.equal(stageOf('incomplete').label,'暂未找到 · 待继续查找');assert.equal(stageOf('blocked').label,'访问受阻 · 需人工或稍后重试');assert.equal(stageOf('not_started',{other:['x']}).label,'联系方式待核验');
 const css=read('style.css');assert(/\.qr-code svg\{[^}]*stroke:none/.test(css)&&/\.qr-code svg \*\{stroke:none\}/.test(css));
+// Undecoded QR images: never re-encode the image URL as a scannable "add contact" code.
+for(const item of [{type:'qrcode',value:'https://a.com/contact-qr.png'},{type:'wechat_link',value:'https://cdn.a.com/wecom.JPG?v=2'},{type:'other',value:'https://a.com/img/qr.webp#x'}]){
+ assert.equal(qrImageOnly(item),true,item.value);assert.equal(qrEligible(item),false,item.value);
+ const btn=qrButton(item);assert(btn.includes('data-qr-image=')&&!btn.includes(' data-qr="'),item.value);
+ const modal=qrImageModalHTML({...item,source:'https://a.com/contact'});assert(modal.includes('二维码待人工识别')&&modal.includes('没有被成功解码')&&!modal.includes('class="qr-code"')&&!modal.includes('扫码添加联系方式'),item.value)}
+assert.equal(qrImageOnly({type:'wechat_link',value:wecom}),false);assert.equal(qrEligible({type:'wechat_link',value:wecom}),true);
+assert(qrButton({type:'qq_group',value:'https://qm.qq.com/q/abc'}).includes(' data-qr="'));
+{const bad=qrImageModalHTML({type:'qrcode',value:'javascript:alert(1)',source:'javascript:x'});assert(!/href="javascript:/i.test(bad)&&!bad.includes('打开原二维码图片')&&!bad.includes('查看图片所在页面'))}
 console.log('contact qr ok');

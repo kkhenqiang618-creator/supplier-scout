@@ -103,6 +103,33 @@ class FallbackPolicyTests(Harness):
         result, events, calls = self.site([WEAK], [GOOD], [FINISH], env={'SCOUT_CHROME_FALLBACK': '0'})
         self.assertNotIn(('start', 'Chrome'), events); self.assertEqual(len(calls), 1); self.assertTrue(result['render_weak']); self.assertNotIn('_fallback', result)
 
+    def test_chrome_contacts_kept_when_model_fails_mid_chrome_run(self):
+        # Chrome finds the email on its first step, then every model attempt fails: the email must survive.
+        found_and_continue = json.dumps({'action': {'type': 'wait'}, 'contacts': [EMAIL]})
+        with patch('model_service.time.sleep'):
+            result, events, _ = self.site([WEAK], [GOOD], [found_and_continue] + [ModelTransientError('503')] * 6)
+        self.assertNotIsInstance(result, Exception)
+        self.assertEqual(events.count(('start', 'Chrome')), 1)
+        self.assertEqual(result['contact_status'], 'found'); self.assertEqual([r['value'] for r in result['contact_records']], ['sales@example.com'])
+        self.assertEqual(result['contact_records'][0]['browser'], 'Chrome')
+        self.assertTrue(any(w.startswith('Chrome 备用浏览器未完成') for w in result['warnings'])); self.assertNotIn('_fallback', result)
+
+    def test_chrome_launch_failure_keeps_moli_and_batch(self):
+        from browser_agent import BrowserRuntimeError
+        result, events, _ = self.site([PLAIN, WEAK], [GOOD], [json.dumps({'action': {'type': 'wait'}}), FINISH], chrome_fail=BrowserRuntimeError('Chrome 浏览器启动失败（后台运行环境异常），批次已停止'))
+        self.assertNotIsInstance(result, Exception); self.assertEqual(result['contact_status'], 'incomplete')
+        self.assertTrue(any('Chrome 备用浏览器无法启动' in w for w in result['warnings']))
+
+    def test_moli_worker_launch_failure_stops_batch(self):
+        from browser_agent import BrowserRuntimeError
+        events = []
+        with tempfile.TemporaryDirectory() as folder:
+            service = ModelService(os.path.join(folder, 'model.json')); service.save({'base_url': 'https://model.example/v1', 'model': 'fixture'}); data = service.read(); data['tested'] = True; service._write(data)
+            with patch('browser_agent.validate_url'), patch('engine.fetch', return_value=('User-agent: *\nAllow: /', URL + 'robots.txt')):
+                with self.assertRaises(BrowserRuntimeError):
+                    run_site(URL, 'contacts', service, [], moli_factory=factory('Moli', [GOOD], events, BrowserRuntimeError('Moli 浏览器启动失败（后台运行环境异常），批次已停止')), chrome_factory=factory('Chrome', [GOOD], events))
+        self.assertNotIn(('start', 'Chrome'), events)
+
     def test_model_transient_and_service_error_on_moli_never_retry(self):
         result, events, _ = self.site([WEAK, PLAIN], [GOOD], [ModelTransientError('503')] * 3, env={'SCOUT_CHROME_FALLBACK': '0'})
         self.assertIsInstance(result, ModelTransientSiteError); self.assertNotIn(('start', 'Chrome'), events); self.assertNotIn('_fallback', result.partial)

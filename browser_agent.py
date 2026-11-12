@@ -188,7 +188,7 @@ class Browser:
         except queue.Empty:line=''
         try:ready=json.loads(line) if line else {}
         except ValueError:ready={}
-        if not ready.get('ready'):raise ValueError(self.label+' 浏览器启动失败'+('：'+str(ready.get('error'))[:200] if ready.get('error') else ''))
+        if not ready.get('ready'):raise BrowserRuntimeError(self.label+' 浏览器启动失败（后台运行环境异常），批次已停止'+('：'+str(ready.get('error'))[:200] if ready.get('error') else ''))
     @staticmethod
     def _read(stream,replies):
         try:
@@ -617,9 +617,16 @@ def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browse
     if site_end-clock()<startup:return only_moli(moli,'本站剩余时间不足，未启动 Chrome 备用浏览器')
     log('Moli 未能完整读取页面，改用 Chrome 备用浏览器重试')
     try:chrome=run_agent(url,scope,service,rules,log,browser_factory=chrome_factory,deadline=site_end,clock=clock,extended_deadline=extended_end)
-    except ModelTransientSiteError as error:return only_moli(moli,'Chrome 备用浏览器未完成：'+str(error)[:300])
+    except ModelTransientSiteError as error:
+        # Model failed mid-Chrome-run: keep the contacts Chrome already verified (error.partial), merged with Moli's.
+        partial=strip_internal(error.partial or {})
+        if not partial.get('contact_records') and not partial.get('sources'):return only_moli(moli,'Chrome 备用浏览器未完成：'+str(error)[:300])
+        merged=merge_results(strip_internal(moli),partial);merged['warnings'].append('Chrome 备用浏览器未完成：'+str(error)[:300]);return merged
     except AgentServiceError as error:
         error.partial=merge_results(strip_internal(moli),strip_internal(error.partial or {}));raise
+    except BrowserRuntimeError as error:
+        # Chrome is only the fallback: if it cannot launch, keep Moli's result and the batch running (Moli itself is healthy).
+        return without_chrome(moli,'Chrome 备用浏览器无法启动，已保留 Moli 结果：'+str(error)[:300])
     except Exception as error:return without_chrome(moli,'Chrome 备用浏览器未完成：'+str(error)[:300])
     strip_internal(chrome)
     # Chrome never observed a page (launch failure, robots/network refusal): keep Moli's result.
