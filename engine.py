@@ -125,8 +125,10 @@ def validate_url(url):
     if parsed.scheme not in ['http','https'] or not parsed.hostname or parsed.username or parsed.password: raise ValueError('只允许无账号密码的公开 HTTP/HTTPS 地址')
     if parsed.port and parsed.port not in [80,443]: raise ValueError('只允许 80/443 端口')
     if parsed.hostname.lower()=='localhost' or parsed.hostname.endswith(('.local','.internal','.example')): raise ValueError('该域名不是公开网站')
-    try: addresses=socket.getaddrinfo(parsed.hostname,parsed.port or (443 if parsed.scheme=='https' else 80),type=socket.SOCK_STREAM)
-    except socket.gaierror: raise ValueError('域名无法解析')
+    from browser_egress import configured_upstream
+    upstream=configured_upstream()
+    try: addresses=(upstream.resolve if upstream else socket.getaddrinfo)(parsed.hostname,parsed.port or (443 if parsed.scheme=='https' else 80),type=socket.SOCK_STREAM)
+    except OSError: raise ValueError('域名无法解析（请检查采集网络出口）') from None
     if not addresses or any(not is_public_ip(row[4][0]) for row in addresses): raise ValueError('禁止访问内网、回环或保留地址')
     return url
 
@@ -138,11 +140,13 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
 def fetch(url):
     validate_url(url)
     req=urllib.request.Request(url,headers={'User-Agent':'SupplierScout/0.1 (public-page research)','Accept':'text/html,text/plain'})
-    with urllib.request.build_opener(SafeRedirect).open(req,timeout=12) as response:
-        if response.headers.get_content_type() not in ['text/html','text/plain','application/xhtml+xml']: raise ValueError('页面不是可解析的 HTML/文本')
-        raw=response.read(1500001)
-        if len(raw)>1500000: raise ValueError('页面超过 1.5MB 限制')
-        return raw.decode(response.headers.get_content_charset() or 'utf-8',errors='replace'),response.url
+    from browser_egress import collection_opener
+    with collection_opener(SafeRedirect) as opener:
+        with opener.open(req,timeout=12) as response:
+            if response.headers.get_content_type() not in ['text/html','text/plain','application/xhtml+xml']: raise ValueError('页面不是可解析的 HTML/文本')
+            raw=response.read(1500001)
+            if len(raw)>1500000: raise ValueError('页面超过 1.5MB 限制')
+            return raw.decode(response.headers.get_content_charset() or 'utf-8',errors='replace'),response.url
 
 def render_page(url):
     validate_url(url)

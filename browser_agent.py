@@ -133,7 +133,8 @@ def fetch_robots_once(url):
     except (urllib.error.URLError,TimeoutError):
         # Some public sites reject the system Python's older TLS handshake.
         # curl retains certificate verification; redirects are checked individually.
-        if not shutil.which('curl'):raise
+        from browser_egress import configured_upstream
+        if configured_upstream() or not shutil.which('curl'):raise
         with tempfile.TemporaryDirectory(prefix='scout-policy-') as folder:
             target=url;body=Path(folder)/'body';headers=Path(folder)/'headers'
             for _ in range(5):
@@ -169,9 +170,18 @@ class Browser:
     label='Moli'
     def __init__(self,folder,*,allow_loopback_for_tests=False):
         binary,module=runtime_paths();network=['--block-cidrs',LOOPBACK_TEST_BLOCK_CIDRS] if allow_loopback_for_tests is True else ['--block-private-networks'];sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
-        self.folder=Path(folder);self.stderr=(self.folder/'browser.log').open('w');self.worker=None;self.server=None
+        self.folder=Path(folder);self.stderr=(self.folder/'browser.log').open('w');self.worker=None;self.server=None;self.proxy=None
         try:
-            try:self.server=subprocess.Popen([binary,'serve','--port',str(port),'--layout','--image',*network,'--http-timeout','15000','--http-connect-timeout','5000','--timeout','25'],stdout=self.stderr,stderr=self.stderr)
+            from browser_egress import configured_upstream
+            upstream=configured_upstream();route=[]
+            if upstream:
+                from egress_proxy import GuardProxy
+                self.proxy=GuardProxy(upstream=upstream)
+                route=['--http-proxy','http://127.0.0.1:'+str(self.proxy.port),'--http-no-proxy','']
+                # Proxy targets are filtered and pinned by GuardProxy. Moli's direct
+                # private-network switch would also reject the loopback proxy itself.
+                network=[]
+            try:self.server=subprocess.Popen([binary,'serve','--port',str(port),'--layout','--image',*network,*route,'--http-timeout','15000','--http-connect-timeout','5000','--timeout','25'],stdout=self.stderr,stderr=self.stderr)
             except OSError as error:raise BrowserRuntimeError('Moli 浏览器进程无法启动（后台运行环境异常），批次已停止：'+str(error)[:200]) from error
             endpoint='http://127.0.0.1:'+str(port)
             deadline=time.monotonic()+12
@@ -229,6 +239,7 @@ class Browser:
             try:self.server.wait(timeout=2)
             except subprocess.TimeoutExpired:self.server.kill();self.server.wait()
         self.stderr.close()
+        if getattr(self,'proxy',None):self.proxy.close()
 
 def chrome_binary():
     """SCOUT_CHROME_BIN in the image; otherwise Playwright's own headless shell (None lets Playwright pick it)."""
@@ -262,7 +273,9 @@ class ChromeBrowser(Browser):
             if self.worker and self.worker.poll() is None:
                 try:self.worker.stdin.close();self.worker.wait(timeout=8)
                 except Exception:self.worker.kill();self.worker.wait()
-            Browser.close(self)
+            proxy=self.proxy;self.proxy=None
+            try:Browser.close(self)
+            finally:self.proxy=proxy
         finally:
             if self.proxy:self.proxy.close()
 
@@ -292,8 +305,9 @@ class PeerHTTPSHandler(urllib.request.HTTPSHandler):
 def download_image(src):
     validate_url(src)
     from engine import SafeRedirect
-    with urllib.request.build_opener(SafeRedirect(),PeerHTTPHandler(),PeerHTTPSHandler()).open(src,timeout=12) as response:
-        data=response.read(QR_MAX_BYTES+1)
+    from browser_egress import collection_opener
+    with collection_opener(SafeRedirect(),PeerHTTPHandler(),PeerHTTPSHandler()) as opener:
+        with opener.open(src,timeout=12) as response:data=response.read(QR_MAX_BYTES+1)
     if len(data)>QR_MAX_BYTES:raise ValueError('二维码图片过大')
     return data
 def run_qr_decoder(path):

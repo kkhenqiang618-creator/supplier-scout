@@ -82,3 +82,18 @@ node --check static/app.js
 旧入口完全无法读取时，可在“联系与复核”的对应行点“更新网址”，填写已确认的新网址及依据。保存不会重置联系人、报价、人工结论或草稿；旧检查结果保留，需单独重采新入口。运行中禁止手动改址，同账号已有相同网址或旧值已变更时会阻止覆盖。旧地址与依据可在“来源与过程”查看，使用现有contact_result JSON，无需数据库迁移。
 
 迁移验证：`python tests/browser_entry_recovery.py`（加`--moli`验证Moli）；编辑器异步导航回归：`SCOUT_TEST_URL=http://127.0.0.1:端口 node tests/browser_entry_editor.cjs`，仅接受隔离的本机测试服务。
+
+### 采集网络出口（可选）
+
+系统浏览器能访问网站，不代表独立 Moli/Chrome 已使用相同代理。需要代理的运行环境，在启动 Python 服务或 Daemon **前**设置 `SCOUT_BROWSER_PROXY_URL`，例如本机已有 HTTP 代理：
+
+```sh
+export SCOUT_BROWSER_PROXY_URL=http://127.0.0.1:7897
+python server.py --port 8767
+```
+
+端口应使用本机实际代理端口；不自动检测系统代理，不支持将密码写入该 URL。云端须配置云端可达的 HTTP 代理，`127.0.0.1` 只表示执行采集的那台服务器，不能指向用户电脑。未配置时保留原直连行为；配置错误或代理失效时报告失败，不静默退回直连。此配置只影响供应商采集网络，不改变个人模型 API 配置。
+
+配置后 Moli、Chrome、robots 文件和二维码图片均经应用 GuardProxy。目标 DNS 经该代理查询 Cloudflare DoH；只把已核验的公网 IP 交给上游 CONNECT，浏览器仍以原域名校验证书。内网、回环、保留地址、非80/443端口及混合公网/私网解析均拒绝。显式采集出口不受 `NO_PROXY` 绕过。Cloudflare DoH 不可达会阻止该代理线路采集，应先检查代理出口，不能通过关闭公网检查解决。
+
+回归：`python -m unittest discover -s tests -p 'test_browser_egress.py' -v`。生产环境须另行核验真实 Daemon 出口和小样本采集；本机页面可读不能代表云端已恢复。

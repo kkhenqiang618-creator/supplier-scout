@@ -31,8 +31,12 @@ def resolve_public(host,port,*,resolver=socket.getaddrinfo,allow_loopback=False)
     return addresses[0]
 
 class GuardProxy:
-    def __init__(self,*,allow_loopback_for_tests=False,resolver=socket.getaddrinfo):
-        self.allow_loopback=allow_loopback_for_tests is True;self.resolver=resolver
+    def __init__(self,*,allow_loopback_for_tests=False,resolver=socket.getaddrinfo,upstream=None):
+        self.allow_loopback=allow_loopback_for_tests is True;self.upstream=upstream
+        if upstream is None:
+            from browser_egress import configured_upstream
+            self.upstream=configured_upstream()
+        self.resolver=self.upstream.resolve if self.upstream else resolver
         self.denied=collections.deque(maxlen=50);self.allowed=collections.deque(maxlen=200)
         self.slots=threading.BoundedSemaphore(MAX_CONNECTIONS);self.sockets=set();self.lock=threading.Lock()
         proxy=self
@@ -50,6 +54,8 @@ class GuardProxy:
             except OSError:pass
             try:sock.close()
             except OSError:pass
+    def _connect(self,ip,port):
+        return self.upstream.connect(ip,port) if self.upstream else socket.create_connection((ip,port),timeout=CONNECT_TIMEOUT)
     def _track(self,sock,add=True):
         with self.lock:(self.sockets.add if add else self.sockets.discard)(sock)
     def _refuse(self,client,code,reason,target=''):
@@ -81,7 +87,7 @@ class GuardProxy:
                 if not sep or not port.isdigit():return self._refuse(client,400,'CONNECT 目标无效',target)
                 try:ip=resolve_public(host,int(port),resolver=self.resolver,allow_loopback=self.allow_loopback)
                 except Denied as error:return self._refuse(client,403,str(error),target)
-                try:upstream=socket.create_connection((ip,int(port)),timeout=CONNECT_TIMEOUT)
+                try:upstream=self._connect(ip,int(port))
                 except OSError:return self._refuse(client,502,'无法连接目标站点',target)
                 self._track(upstream);self.allowed.append(('CONNECT',target,ip))
                 client.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
@@ -108,7 +114,7 @@ class GuardProxy:
             kept=[(n,v) for n,v in headers if n.lower() not in dropped]
             if 'host' not in names:kept.insert(0,('Host',split.netloc))
             request=(method+' '+path+' '+version+'\r\n'+''.join(n+': '+v+'\r\n' for n,v in kept)+'Connection: close\r\n\r\n').encode('latin-1')+body[:int(length)]
-            try:upstream=socket.create_connection((ip,port),timeout=CONNECT_TIMEOUT)
+            try:upstream=self._connect(ip,port)
             except OSError:return self._refuse(client,502,'无法连接目标站点',target)
             self._track(upstream);self.allowed.append((method,target,ip))
             upstream.sendall(request)
