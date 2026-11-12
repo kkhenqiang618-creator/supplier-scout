@@ -1,4 +1,5 @@
 """User-chosen Chat Completions provider; configuration and keys stay local."""
+import base64
 import json
 import os
 import random
@@ -32,6 +33,36 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,request,fp,code,message,headers,newurl):
         raise ValueError('模型接口发生重定向；请填写最终 API URL 后重试')
 
+KEY_PREFIX='dpapi:'
+KEY_UNREADABLE='本机保存的 API Key 无法解密（可能更换了 Windows 用户或电脑），请重新填写'
+
+def _dpapi(data,protect):
+    """Windows CryptProtectData/CryptUnprotectData: only the saving Windows user can read the blob."""
+    import ctypes
+    from ctypes import wintypes
+    class Blob(ctypes.Structure):
+        _fields_=[('size',wintypes.DWORD),('data',ctypes.POINTER(ctypes.c_char))]
+    crypt32=ctypes.WinDLL('crypt32',use_last_error=True);kernel32=ctypes.WinDLL('kernel32',use_last_error=True)
+    buffer=ctypes.create_string_buffer(data,len(data))
+    source=Blob(len(data),ctypes.cast(buffer,ctypes.POINTER(ctypes.c_char)));result=Blob()
+    call=crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    call.argtypes=[ctypes.POINTER(Blob),ctypes.c_void_p,ctypes.POINTER(Blob),ctypes.c_void_p,ctypes.c_void_p,wintypes.DWORD,ctypes.POINTER(Blob)]
+    call.restype=wintypes.BOOL
+    if not call(ctypes.byref(source),None,None,None,None,0x1,ctypes.byref(result)):raise OSError(ctypes.get_last_error(),'Windows 凭据加密失败')
+    try:return ctypes.string_at(result.data,result.size)
+    finally:
+        kernel32.LocalFree.argtypes=[ctypes.c_void_p];kernel32.LocalFree(result.data)
+
+def protect_key(key):
+    """On Windows, store the key as a DPAPI blob: os.chmod(0o600) is a no-op there (it only toggles the read-only bit)."""
+    if os.name!='nt' or not key:return key
+    return KEY_PREFIX+base64.b64encode(_dpapi(key.encode('utf-8'),True)).decode('ascii')
+
+def unprotect_key(value):
+    if not value.startswith(KEY_PREFIX):return value,''
+    try:return _dpapi(base64.b64decode(value[len(KEY_PREFIX):]),False).decode('utf-8'),''
+    except Exception:return '',KEY_UNREADABLE
+
 def origin(url):
     parsed=urlsplit(url)
     return parsed.scheme.lower(),(parsed.hostname or '').lower(),parsed.port or (443 if parsed.scheme=='https' else 80)
@@ -43,10 +74,14 @@ class ModelService:
     def __init__(self,path): self.path=Path(path);self.lock=threading.RLock()
     def read(self):
         with self.lock:
-            return json.loads(self.path.read_text()) if self.path.exists() else {}
+            data=json.loads(self.path.read_text()) if self.path.exists() else {}
+        raw=str(data.get('api_key') or '');key,error=unprotect_key(raw)
+        data['api_key']=key;data['key_protected']=raw.startswith(KEY_PREFIX)
+        if error:data['key_error']=error
+        return data
     def public(self):
-        data=self.read()
-        return {'base_url':data.get('base_url',''),'model':data.get('model',''),'key_configured':bool(data.get('api_key')),'configured':bool(data.get('base_url') and data.get('model')),'tested':data.get('tested',False)}
+        data=self.read();key_error=data.get('key_error','')
+        return {'base_url':data.get('base_url',''),'model':data.get('model',''),'key_configured':bool(data.get('api_key')),'configured':bool(data.get('base_url') and data.get('model')),'tested':bool(data.get('tested')) and not key_error,'key_protected':bool(data.get('key_protected')),'key_error':key_error}
     def save(self,data):
         url=str(data.get('base_url','')).strip().rstrip('/');model=str(data.get('model','')).strip();parts=urlsplit(url)
         if parts.scheme not in ['http','https'] or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment: raise ValueError('请填写模型服务的 API 地址，例如 https://服务域名/v1')
@@ -54,6 +89,7 @@ class ModelService:
         with self.lock:
             old=self.read();same_origin=origin(url)==origin(old.get('base_url',''))
             key=str(data.get('api_key','')).strip() or (old.get('api_key','') if same_origin else '')
+            if old.get('key_error') and not str(data.get('api_key','')).strip():raise ValueError(old['key_error']+'；请重新填写 API Key 后再保存')
             self._write({'base_url':api_base(url),'model':model,'api_key':key,'tested':False,'revision':uuid.uuid4().hex})
             return self.public()
     def models(self,config=None):
@@ -76,6 +112,7 @@ class ModelService:
                 delay=min(delay,RETRY_WAIT_CAP-waited);waited+=delay;time.sleep(delay)
     def _complete_once(self,messages,config=None):
         data=dict(config if config is not None else self.read())
+        if data.get('key_error'):raise ModelConfigError(data['key_error']+'；请重新填写 API Key 后再开始采集')
         if not data.get('base_url') or not data.get('model'): raise ModelConfigError('请先在模型服务设置中填写 API URL、模型名和密钥')
         endpoint=api_base(data['base_url']);endpoint=endpoint if endpoint.endswith('/chat/completions') else endpoint+'/chat/completions'
         headers={'Content-Type':'application/json'}
@@ -108,6 +145,7 @@ class ModelService:
             raise ModelConfigError('模型服务调用失败：'+message[:300])
     def test(self):
         config=self.read()
+        if config.get('key_error'):raise ModelConfigError(config['key_error']+'；请重新填写 API Key 后再测试')
         original_model=config.get('model')
         try:
             available=self.models(config)
@@ -123,10 +161,15 @@ class ModelService:
             current.update(tested=True,model=config['model'],base_url=api_base(config['base_url']));self._write(current)
         return {'ok':True,'reply':answer[:200],'model':config['model'],'model_adjusted':original_model!=config['model']}
     def _write(self,data):
+        data={key:value for key,value in data.items() if key not in ('key_error','key_protected')}
+        if data.get('api_key'):
+            try:data['api_key']=protect_key(str(data['api_key']))
+            except OSError as error:raise ValueError('API Key 无法通过 Windows 凭据加密保存：'+str(error))
         self.path.parent.mkdir(parents=True,exist_ok=True);temporary=None
         try:
             with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=str(self.path.parent),delete=False) as stream:
                 temporary=Path(stream.name);json.dump(data,stream,ensure_ascii=False)
-            os.chmod(temporary,0o600);os.replace(temporary,self.path)
+            if os.name!='nt':os.chmod(temporary,0o600)  # Windows ignores the mode; DPAPI above protects the value instead.
+            os.replace(temporary,self.path)
         finally:
             if temporary and temporary.exists():temporary.unlink()

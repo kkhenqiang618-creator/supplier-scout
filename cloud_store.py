@@ -218,9 +218,31 @@ class PostgresStore(Store):
                     job=self.job_state(row);job.update(created_at=str(row['created_at']),updated_at=str(row['updated_at']))
                     result[row['owner']]['jobs'].append(job)
         return {'members':list(result.values())}
+    @staticmethod
+    def busy_message(row,admin=False):
+        """Name the occupant of the single cloud browser and its progress instead of a bare refusal.
+
+        Only administrators see the occupant's name and progress; other members just learn
+        that the shared browser is busy, so one member's workload is not visible to the team.
+        """
+        if not row or not admin:return '云端浏览器正在执行其他批次，请稍后重试'
+        name=str(row.get('owner') or '').strip()
+        if not name:return '云端浏览器正在执行其他批次，请稍后重试'
+        total=int(row.get('total') or 0);done=int(row.get('position') or 0)
+        progress='，已完成 %d/%d 家'%(done,total) if total else ''
+        return '云端浏览器同一时间只执行一个批次：成员 '+name+'正在采集'+progress+'，请稍后重试或等该批次结束后继续'
+        return '云端浏览器同一时间只执行一个批次：'+who+'正在采集'+progress+'，请稍后重试或等该批次结束后继续'
+    def _busy_message(self):
+        """The insert collides with the global one-active-batch index, which RLS hides from the caller's pre-check."""
+        try:
+            with Database(self.database.url).transaction() as db:
+                row=db.execute("SELECT owner,position,state->>'total' AS total FROM cloud_jobs WHERE status IN ('queued','running','stopping') ORDER BY created_at LIMIT 1").fetchone()
+        except psycopg.Error:
+            row=None
+        return self.busy_message(row,getattr(self,'is_admin',False))
     def start_job(self,mode,ids=None,scope='all',selection='remaining'):
         try:return self._start_job(mode,ids,scope,selection)
-        except psycopg.errors.UniqueViolation:raise ValueError('云端浏览器正在执行任务，请稍后重试') from None
+        except psycopg.errors.UniqueViolation:raise ValueError(self._busy_message()) from None
     def _start_job(self,mode,ids=None,scope='all',selection='remaining'):
         if mode not in ['real','demo'] or scope not in ['all','contacts'] or selection not in ['remaining','all']:raise ValueError('采集模式或范围无效')
         if mode=='real' and (not self.model_service.public()['configured'] or not self.model_service.public()['key_configured']):raise ValueError('请先为当前账号配置 API URL、模型名和 API Key')

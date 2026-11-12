@@ -1,12 +1,12 @@
 """One-time private local SQLite import. Credentials are read only from env/files."""
-import argparse,json,sqlite3,sys
+import argparse,contextlib,json,sqlite3,sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from cloud_store import PostgresStore
 
 def migrate(source,provider=None):
     store=PostgresStore();counts={}
-    with sqlite3.connect(source) as source_db,store.database.transaction(write=True) as db:
+    with contextlib.closing(sqlite3.connect(source)) as source_db,store.database.transaction(write=True) as db:
         source_db.row_factory=sqlite3.Row
         if db.execute('SELECT 1 FROM suppliers LIMIT 1').fetchone():raise ValueError('云端已有供应商，停止导入以避免覆盖；请人工检查迁移状态')
         for table in ['suppliers','settings','events','history','drafts']:

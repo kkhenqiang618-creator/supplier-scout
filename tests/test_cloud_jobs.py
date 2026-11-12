@@ -169,4 +169,22 @@ class CloudJobResilienceTests(unittest.TestCase):
         self.assertEqual(running['waiting_seconds'],0);self.assertGreaterEqual(running['heartbeat_age'],70);self.assertIn('claimed_at',running)
         self.assertEqual(PostgresStore.job_state(dict(base,status='stopped',state={'heartbeat_at':clock-500}))['heartbeat_age'],0)
 
+    def test_busy_message_names_the_occupant_and_its_progress(self):
+        from cloud_store import PostgresStore
+        row={'owner':'小姜','position':12,'total':40}
+        admin=PostgresStore.busy_message(row,True)
+        self.assertIn('成员 小姜',admin);self.assertIn('12/40',admin)
+        member=PostgresStore.busy_message(row,False)
+        self.assertEqual(member,'云端浏览器正在执行其他批次，请稍后重试')
+        self.assertNotIn('小姜',member);self.assertNotIn('12/40',member);self.assertNotIn('其他成员',member)
+        self.assertIn('其他批次',PostgresStore.busy_message(None,True))
+        unnamed={'owner':'','position':3,'total':9}
+        self.assertEqual(PostgresStore.busy_message(unnamed,True),'云端浏览器正在执行其他批次，请稍后重试')
+    def test_start_job_collision_reports_the_occupant(self):
+        import psycopg
+        store,_=self.scripted_store(None)
+        def collide(*args,**kwargs):raise psycopg.errors.UniqueViolation('one active batch')
+        store._start_job=collide;store._busy_message=lambda:'云端浏览器同一时间只执行一个批次：成员 小姜正在采集，已完成 12/40 家，请稍后重试'
+        with self.assertRaisesRegex(ValueError,'成员 小姜'):store.start_job('real',scope='contacts')
+
 if __name__=='__main__':unittest.main()
