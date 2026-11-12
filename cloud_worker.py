@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 from urllib.parse import urlsplit
 from cloud_store import PostgresStore, LostLease
 from model_service import ModelService, ModelConfigError, ModelTransientError, PHASE_TEXT, NETWORK_PHASES
-from server import collect_site, CollectionCancelled, AgentServiceError
+from server import collect_site, CollectionCancelled, AgentServiceError, BatchRuntimeError
 try:from server import ModelTransientSiteError
 except ImportError:
     class ModelTransientSiteError(ValueError):partial=None
@@ -144,6 +144,8 @@ def execute_job(store,job,owner,shutdown):
                     store.save_contacts(row['id'],result)
                     db.execute('UPDATE cloud_jobs SET position=?,updated_at=now() WHERE id=?',(index+1,job['id']))
                 model_failures=0
+            except BatchRuntimeError as error:
+                store.finish_job(job['id'],owner,'failed',str(error)[:400]);return  # Environment problem: do not touch any supplier row.
             except ModelTransientSiteError as error:
                 with store.fenced(job['id'],owner) as (db,current):
                     if current['cancel_requested'] or stop.is_set():raise CollectionCancelled()

@@ -33,6 +33,8 @@ def encode(value): return json.dumps(value,ensure_ascii=False,allow_nan=False)
 class CollectionCancelled(Exception): pass
 class AgentServiceError(ValueError):
     def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
+class BatchRuntimeError(ValueError):
+    """Browser runtime (Moli/Playwright) missing or refusing to start: stop the batch instead of marking every site blocked."""
 class ModelTransientSiteError(ValueError):
     """Model still unavailable after retries for this site only; the batch should continue.
     collect_site raises it for worker message {'kind':'error','fatal':False,'model_transient':True,'partial':...}.
@@ -62,6 +64,7 @@ def collect_site(url,log,stop_event,scope="all",model_path=None,rules=None):
             if message.get('kind')=='log': log(message['message'])
             elif message.get('kind')=='result': return message['data']
             elif message.get('kind')=='error':
+                if message.get('runtime'): raise BatchRuntimeError(message['message'])
                 if message.get('fatal'): raise AgentServiceError(message['message'],message.get('partial'))
                 if message.get('model_transient'): raise ModelTransientSiteError(message['message'],message.get('partial'))
                 raise ValueError(message['message'])
@@ -241,6 +244,11 @@ class Store:
                         self.job['done']+=1
                     model_failures=0
                 except CollectionCancelled: break
+                except BatchRuntimeError as e:
+                    if self.stop_event.is_set(): break
+                    self.job.update(status='failed',error=str(e),stage='浏览器运行环境异常，批次已停止')
+                    self.event('批次因浏览器运行环境异常停止：'+str(e)[:500],mode=mode)
+                    break
                 except ModelTransientSiteError as e:
                     with self.lock:
                         if self.stop_event.is_set(): break

@@ -26,6 +26,8 @@ ROOT=Path(__file__).resolve().parent
 CONTACT_TYPES={'email','phone','wechat','qq','qq_group','wechat_link','official_account','telegram','discord','contact_form','online_service','qrcode','other'}
 
 class AgentServiceError(ValueError):pass
+class BrowserRuntimeError(ValueError):
+    """Moli or Playwright is missing or will not start: an environment problem, not this site's fault, so the batch stops."""
 class BrowserDeadError(ValueError):
     """Worker gone or unresponsive past COMMAND_TIMEOUT: later browser actions cannot succeed, so the site ends now."""
 class ModelTransientSiteError(ValueError):
@@ -107,7 +109,22 @@ def qr_contact_records(snapshot,ref,decoded):
         records.append({'type':kind,'value':value,'purpose':'扫码联系；具体客服或商务用途待确认','source_url':snapshot['url'],'evidence':value,'qr_source_url':image.get('src',''),'risk_flags':['来自联系二维码的实际解码，商务用途待核实']})
     return records
 
-def fetch_robots(url):
+def fetch_robots(url,attempts=2):
+    """One retry for a transient failure (timeout, TLS, 5xx); a clear HTTP answer is returned to the caller at once."""
+    last=None
+    for attempt in range(attempts):
+        try:return fetch_robots_once(url)
+        except urllib.error.HTTPError as error:
+            if not (error.code==429 or error.code>=500) or attempt+1>=attempts:raise
+            last=error
+        except (ValueError,OSError) as error:
+            if attempt+1>=attempts:raise
+            last=error
+        # Stop still lands within seconds: the worker runs in its own process group and collect_site kills it.
+        time.sleep(1.5)
+    raise last
+
+def fetch_robots_once(url):
     from engine import fetch
     try:return fetch(url)
     except urllib.error.HTTPError:raise
@@ -139,7 +156,7 @@ def runtime_paths():
     if not module:
         choices=[ROOT/'node_modules'/'playwright']+list((Path.home()/'.npm'/'_npx').glob('*/node_modules/playwright'))
         module=next((str(p) for p in choices if (p/'package.json').exists()),None)
-    if not binary or not module:raise ValueError('浏览器运行环境未就绪，需要安装 Moli 与 Playwright')
+    if not binary or not module:raise BrowserRuntimeError('浏览器运行环境未就绪（后台缺少 Moli 或 Playwright），批次已停止')
     return binary,module
 
 # Test-only (tests/browser_regression.py): Moli 1.1.23 has no allowlist, so loopback fixtures run with every non-loopback private/reserved range blocked instead of --block-private-networks.
@@ -159,7 +176,7 @@ class Browser:
                 try:
                     with urllib.request.urlopen(endpoint+'/json/version',timeout=.5):break
                 except Exception:
-                    if time.monotonic()>deadline or self.server.poll() is not None:raise ValueError('Moli 浏览器启动失败')
+                    if time.monotonic()>deadline or self.server.poll() is not None:raise BrowserRuntimeError('Moli 浏览器启动失败（后台运行环境异常），批次已停止')
                     time.sleep(.1)
             self._spawn(module,['cdp',endpoint])
         except Exception:self.close();raise
@@ -354,7 +371,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
         try:service.test()
         except ModelTransientError as error:raise ModelTransientSiteError(MODEL_TRANSIENT_SUMMARY+'：'+str(error),{'contacts':{},'contact_records':[],'contact_status':'incomplete','contact_summary':MODEL_TRANSIENT_SUMMARY,'sources':[],'steps':[],'warnings':[str(error)],'offers':[],'scope':scope,'model_transient':True})
         except ValueError as error:raise AgentServiceError(str(error))
-    policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False;weak=[];fallback={'weak':False,'dead':False,'escalated':False}
+    policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False;weak=[];fallback={'weak':False,'dead':False,'escalated':False};unreadable={}
     label=getattr(browser_factory,'label','Moli');method=label+' 浏览器 Agent'
     def current_deadline():
         return weak_deadline if weak_deadline is not None and fallback['weak'] and not records else deadline
@@ -371,10 +388,14 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
             parser=urllib.robotparser.RobotFileParser();parser.set_url(origin+'/robots.txt')
             try:body,_=fetch_robots(origin+'/robots.txt');parser.parse(body.splitlines())
             except urllib.error.HTTPError as error:
-                if error.code in [404,410]:parser.parse([])
-                else:raise ValueError('robots.txt 无法确认允许访问：'+str(error.code))
+                if error.code in [404,410]:parser.allow_all=True  # No robots file: crawl freely, nothing to warn about.
+                elif error.code in [401,403] or 400<=error.code<500 and error.code!=429:parser.allow_all=True;unreadable[origin]=str(error.code)  # RFC 9309: 4xx means no rules; only 429 is transient.
+                else:parser.allow_all=True;unreadable[origin]=str(error.code)
+            except Exception as error:parser.allow_all=True;unreadable[origin]=str(error)[:120]
             policy[origin]=parser
         if not policy[origin].can_fetch('SupplierScout',target):raise ValueError('robots.txt 不允许读取该页面')
+        if origin in unreadable:  # Never read a robots file: keep going (public pages only) but say why it was unverified.
+            warnings.append('robots.txt 读取失败（'+unreadable.pop(origin)+'），已按未声明处理，仅访问公开页面')
     with tempfile.TemporaryDirectory(prefix='scout-agent-') as folder:
         browser=None
         try:
@@ -477,6 +498,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
             if error.partial is None:error.partial=dict(result(),**({'contact_status':'incomplete'} if records else {}),contact_summary=(('已找到 '+str(len(records))+' 条联系线索；' if records else '')+MODEL_TRANSIENT_SUMMARY),model_transient=True)
             raise
         except BrowserDeadError as error:fallback['dead']=True;blocked=True;warnings.append(str(error)[:400]);log('访问受阻：'+str(error)[:200])
+        except BrowserRuntimeError:raise
         except Exception as error:blocked=True;warnings.append(str(error)[:400]);log('访问受阻：'+str(error)[:200])
         finally:
             if browser:browser.close()
@@ -543,6 +565,7 @@ def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browse
         return only_moli(result,warning)
     try:moli=moli_run(enabled)
     except (AgentServiceError,ModelTransientSiteError) as error:strip_internal(getattr(error,'partial',None));raise
+    except BrowserRuntimeError:raise
     if not enabled or not needs_chrome(moli):return only_moli(moli)
     if start+SITE_BUDGET-clock()<STEP_RESERVE:return only_moli(moli,'本站剩余时间不足，未启动 Chrome 备用浏览器')
     log('Moli 未能完整读取页面，改用 Chrome 备用浏览器重试')

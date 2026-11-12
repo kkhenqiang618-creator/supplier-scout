@@ -1,7 +1,7 @@
 """Isolated autonomous agent worker. Parent can stop the full browser process group."""
 import json
 import sys
-from browser_agent import run_site,AgentServiceError,ModelTransientSiteError
+from browser_agent import run_site,AgentServiceError,ModelTransientSiteError,BrowserRuntimeError
 
 def emit(value):print(json.dumps(value,ensure_ascii=False),flush=True)
 if __name__=='__main__':
@@ -10,4 +10,5 @@ if __name__=='__main__':
         emit({'kind':'result','data':result})
     except AgentServiceError as error:emit({'kind':'error','message':str(error),'fatal':True,'partial':getattr(error,'partial',None)})
     except ModelTransientSiteError as error:emit({'kind':'error','message':str(error),'fatal':False,'model_transient':True,'partial':error.partial})
+    except BrowserRuntimeError as error:emit({'kind':'error','message':str(error),'fatal':True,'runtime':True})
     except Exception as error:emit({'kind':'error','message':str(error),'fatal':False})
