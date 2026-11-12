@@ -1,13 +1,32 @@
 """User-chosen Chat Completions provider; configuration and keys stay local."""
 import json
 import os
+import random
+import re
+import socket
+import ssl
 import tempfile
+import time
 import threading
 import uuid
 from pathlib import Path
 import urllib.request
 import urllib.error
 from urllib.parse import urlsplit
+
+class ModelConfigError(ValueError):
+    """Fatal for a batch: credentials, URL, model name or redirect must be fixed by the user."""
+class ModelTransientError(ValueError):
+    """Provider/network failure that ends one site, not the batch; .retry_after seconds (or None), .empty for a blank reply (retried once, then ModelConfigError), .retryable False for oversized/rejected page prompts."""
+    def __init__(self,message,retry_after=None,empty=False,retryable=True):super().__init__(message);self.retry_after=retry_after;self.empty=empty;self.retryable=retryable
+
+PAGE_REJECTED=re.compile(r'context[ _-]?length|context window|maximum context|too many tokens|token limit|max_tokens|prompt is too long|input is too long|content[ _-]?(policy|filter|management)|moderation|safety|sensitive|敏感|违规|上下文|长度超',re.I)
+RETRY_DELAYS=[2,6];RETRY_AFTER_CAP=30;RETRY_WAIT_CAP=40  # Total sleep stays bounded; the parent stop path kills the worker process group.
+
+def retry_after(headers):
+    try:value=float((headers or {}).get('Retry-After') or '')
+    except (TypeError,ValueError,AttributeError):return None
+    return max(0.0,min(RETRY_AFTER_CAP,value))
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,request,fp,code,message,headers,newurl):
@@ -45,20 +64,32 @@ class ModelService:
         request=urllib.request.Request(base+'/models',headers=headers)
         with urllib.request.build_opener(NoRedirect()).open(request,timeout=15) as response:result=json.load(response)
         return [item['id'] for item in result.get('data',[]) if isinstance(item,dict) and isinstance(item.get('id'),str)]
-    def complete(self,messages,config=None):
+    def complete(self,messages,config=None,attempts=3):
+        """Transient errors are retried (empty/non-JSON body only once); raises ModelConfigError or ModelTransientError, both ValueError."""
+        waited=0.0
+        for attempt in range(attempts):
+            try:return self._complete_once(messages,config)
+            except ModelTransientError as error:
+                if error.empty and (attempt>=1 or attempt+1>=attempts):raise ModelConfigError(str(error)) from error  # Blank twice: reasoning/output parameters, not an outage.
+                if attempt+1>=attempts or not error.retryable or waited>=RETRY_WAIT_CAP:raise
+                delay=error.retry_after if error.retry_after is not None else RETRY_DELAYS[min(attempt,len(RETRY_DELAYS)-1)]*random.uniform(.8,1.2)
+                delay=min(delay,RETRY_WAIT_CAP-waited);waited+=delay;time.sleep(delay)
+    def _complete_once(self,messages,config=None):
         data=dict(config if config is not None else self.read())
-        if not data.get('base_url') or not data.get('model'): raise ValueError('请先在模型服务设置中填写 API URL、模型名和密钥')
+        if not data.get('base_url') or not data.get('model'): raise ModelConfigError('请先在模型服务设置中填写 API URL、模型名和密钥')
         endpoint=api_base(data['base_url']);endpoint=endpoint if endpoint.endswith('/chat/completions') else endpoint+'/chat/completions'
         headers={'Content-Type':'application/json'}
         if data.get('api_key'):headers['Authorization']='Bearer '+data['api_key']
         request=urllib.request.Request(endpoint,data=json.dumps({'model':data['model'],'messages':messages}).encode(),headers=headers)
+        empty=False
         try:
-            with urllib.request.build_opener(NoRedirect()).open(request,timeout=45) as response:result=json.load(response)
-            content=result['choices'][0]['message'].get('content')
-            if not isinstance(content,str) or not content.strip():raise ValueError('模型返回空正文，需检查推理与输出参数')
+            with urllib.request.build_opener(NoRedirect()).open(request,timeout=45) as response:
+                try:result=json.load(response);content=result['choices'][0]['message'].get('content')
+                except (ValueError,KeyError,IndexError,TypeError,AttributeError):raise ConnectionError('模型返回内容不是有效的 JSON 响应')
+            if not isinstance(content,str) or not content.strip():empty=True;raise ValueError('模型返回空正文，需检查推理与输出参数')
             return content
         except Exception as error:
-            message=str(error)
+            message=str(error);kind=ModelTransientError if empty else ModelConfigError;wait=None;retryable=True
             if isinstance(error,urllib.error.HTTPError):
                 raw=error.read(8192).decode('utf-8',errors='replace')
                 try:
@@ -69,8 +100,12 @@ class ModelService:
                 if 'No available accounts' in detail:message+='。该模型无可用账号；请核对服务商的准确模型名（区分大小写），或联系服务商检查模型线路'
                 elif error.code==401:message+='。请核对 API Key'
                 elif error.code==404:message+='。请核对 API URL，通常以 /v1 结尾'
+                if 'No available accounts' not in detail and (error.code in [408,409,425,429] or error.code>=500):kind=ModelTransientError;wait=retry_after(error.headers)
+                elif error.code==413 or (error.code in [400,422] and PAGE_REJECTED.search(detail or '')):kind=ModelTransientError;retryable=False  # This page's prompt is too large or rejected; end the site, keep the batch.
+            elif isinstance(error,(socket.timeout,TimeoutError,ssl.SSLError,urllib.error.URLError,OSError,ConnectionError)) or type(error).__module__=='http.client':kind=ModelTransientError
             if data.get('api_key'):message=message.replace(data['api_key'],'[密钥已隐藏]')
-            raise ValueError('模型服务调用失败：'+message[:300])
+            if kind is ModelTransientError:raise ModelTransientError('模型服务调用失败：'+message[:300],wait,empty,retryable)
+            raise ModelConfigError('模型服务调用失败：'+message[:300])
     def test(self):
         config=self.read()
         original_model=config.get('model')
@@ -79,7 +114,7 @@ class ModelService:
             matches=[name for name in available if name.casefold()==str(original_model).casefold()]
             if original_model not in available and len(matches)==1:config=dict(config,model=matches[0])
         except Exception:pass  # Some compatible services do not expose /models.
-        answer=self.complete([{'role':'user','content':'只回复 OK，验证连接。'}],config=config)
+        answer=self.complete([{'role':'user','content':'只回复 OK，验证连接。'}],config=config,attempts=1)  # Interactive path stays within the 120s function limit.
         return self._finish_test(config,original_model,answer)
     def _finish_test(self,config,original_model,answer):
         with self.lock:

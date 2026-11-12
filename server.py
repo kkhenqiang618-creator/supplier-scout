@@ -33,6 +33,11 @@ def encode(value): return json.dumps(value,ensure_ascii=False,allow_nan=False)
 class CollectionCancelled(Exception): pass
 class AgentServiceError(ValueError):
     def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
+class ModelTransientSiteError(ValueError):
+    """Model still unavailable after retries for this site only; the batch should continue.
+    collect_site raises it for worker message {'kind':'error','fatal':False,'model_transient':True,'partial':...}.
+    .partial is a run_agent-shaped result (contacts, contact_records, contact_status, contact_summary, sources, steps, warnings, offers, scope, model_transient=True) with records found so far, or None."""
+    def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
 
 def collect_site(url,log,stop_event,scope="all",model_path=None,rules=None):
     if stop_event.is_set(): raise CollectionCancelled()
@@ -58,6 +63,7 @@ def collect_site(url,log,stop_event,scope="all",model_path=None,rules=None):
             elif message.get('kind')=='result': return message['data']
             elif message.get('kind')=='error':
                 if message.get('fatal'): raise AgentServiceError(message['message'],message.get('partial'))
+                if message.get('model_transient'): raise ModelTransientSiteError(message['message'],message.get('partial'))
                 raise ValueError(message['message'])
     finally:
         if process.poll() is None:
@@ -212,6 +218,7 @@ class Store:
     def run_job(self,rows,mode,scope='all'):
         try:
             self.event(('演示回放' if mode=='demo' else '仅联系方式 Agent' if scope=='contacts' else '全量浏览器 Agent')+'开始：'+str(len(rows))+' 家',mode=mode)
+            model_failures=0
             for row in rows:
                 if self.stop_event.is_set(): break
                 self.job.update(current=row['name'],stage='准备访问 '+row['url'])
@@ -232,7 +239,20 @@ class Store:
                             self.save_result(row['id'],dict(result,contacts=merged,sources=prior['sources']+result.get('sources',[])))
                         self.save_contacts(row['id'],result)
                         self.job['done']+=1
+                    model_failures=0
                 except CollectionCancelled: break
+                except ModelTransientSiteError as e:
+                    with self.lock:
+                        if self.stop_event.is_set(): break
+                        partial=dict(e.partial or {});found=any((partial.get('contacts') or {}).values())
+                        self.save_contacts(row['id'],dict(partial,contacts=partial.get('contacts') or {},sources=partial.get('sources') or [],warnings=list(dict.fromkeys((partial.get('warnings') or [])+[str(e)[:400]])),contact_status='incomplete' if found else 'blocked',contact_summary='模型服务暂时不可用，本站稍后重试',scope=scope))
+                        self.event('模型服务暂时不可用，跳过 '+row['name']+'：'+str(e)[:300],row['id'],mode)
+                        self.job['done']+=1
+                    model_failures+=1
+                    if model_failures>=3:
+                        self.job.update(status='failed',error=str(e),stage='模型服务连续 3 家不可用，批次已暂停；可稍后继续')
+                        self.event('模型服务连续 3 家不可用，批次已暂停；可稍后继续',mode=mode)
+                        break
                 except AgentServiceError as e:
                     if self.stop_event.is_set():break
                     self.save_contacts(row['id'],e.partial or {'contact_status':'blocked','contact_summary':'模型服务调用失败，已停止批次，请检查 API 配置','warnings':[str(e)],'contacts':{},'sources':[],'steps':[],'scope':scope})

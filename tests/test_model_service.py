@@ -62,7 +62,7 @@ class ProviderBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             service=ModelService(Path(folder)/'provider.json')
             service.save({'base_url':'https://example.com/v1','model':'one','api_key':'test-key'})
-            def network(messages,config=None):
+            def network(messages,config=None,attempts=3):
                 service.save({'base_url':'https://example.com/v1','model':'two','api_key':''})
                 return 'OK'
             with patch.object(service,'complete',side_effect=network):

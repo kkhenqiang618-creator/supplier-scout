@@ -13,13 +13,38 @@ import urllib.parse
 import urllib.request
 import urllib.robotparser
 from pathlib import Path
-from model_service import ModelService
+from model_service import ModelService,ModelConfigError,ModelTransientError
 from engine import validate_url
 
 ROOT=Path(__file__).resolve().parent
 CONTACT_TYPES={'email','phone','wechat','qq','qq_group','wechat_link','official_account','telegram','discord','contact_form','online_service','qrcode','other'}
 
 class AgentServiceError(ValueError):pass
+class ModelTransientSiteError(ValueError):
+    """Model stayed unavailable after retries: ends this site only; .partial is the result so far (contact_status incomplete, or blocked/incomplete when nothing was found)."""
+    def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
+MODEL_TRANSIENT_SUMMARY='模型服务暂时不可用（已重试），本站未完成，可稍后重试'
+PROMPT_BUDGET=40000;PROMPT_CONTROLS=150;PROMPT_IMAGES=40;PROMPT_URL=300
+
+def prompt_url(value):
+    value=str(value or '')
+    if value[:5].lower()=='data:':return 'data:'+value[5:].split(',',1)[0].split(';',1)[0][:60]+';len='+str(len(value))
+    return value if len(value)<=PROMPT_URL else value[:PROMPT_URL]+'…'
+def prompt_context(context):
+    """Model-facing copy only; contact/offer verification keeps using the full observations."""
+    page=dict(context['page']);clip=lambda v:v[:200] if isinstance(v,str) else v;page['controls']=[dict(c,href=prompt_url(c['href'])) if c.get('href') else c for c in page.get('controls',[])[:PROMPT_CONTROLS]];page['images']=[dict(i,src=prompt_url(i.get('src'))) for i in page.get('images',[])[:PROMPT_IMAGES]]
+    # page/history urls stay whole: the model cites them as source_url and verification matches exactly.
+    context=dict(context,page=page,known_contacts=[{k:clip(r.get(k)) for k in ['type','value','purpose','source_url','evidence']} for r in context.get('known_contacts',[])],known_offers=[{k:clip(v) for k,v in o.items()} for o in context.get('known_offers',[])])
+    size=lambda:len(json.dumps(context,ensure_ascii=False))
+    for key in ['images','controls']:
+        while page[key] and size()>PROMPT_BUDGET:page[key]=page[key][:len(page[key])//2]
+    for key in ['tail','dialogs','footer','text']:
+        while page.get(key) and size()>PROMPT_BUDGET:
+            over=size()-PROMPT_BUDGET
+            if isinstance(page[key],list):page[key]=page[key][:-1]
+            else:page[key]=page[key][:max(0,len(page[key])-over-200)]
+    if size()>PROMPT_BUDGET:context.update(history=context['history'][-2:],warnings=context.get('warnings',[])[-2:],known_offers=context.get('known_offers',[])[-20:])
+    return context
 
 def compact(text):return re.sub(r'\s+','',str(text or '')).lower()
 def observed_text(snapshot):
@@ -177,6 +202,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
     if not service.public()['tested']:
         log('检查模型服务连接及准确模型名称')
         try:service.test()
+        except ModelTransientError as error:raise ModelTransientSiteError(MODEL_TRANSIENT_SUMMARY+'：'+str(error),{'contacts':{},'contact_records':[],'contact_status':'incomplete','contact_summary':MODEL_TRANSIENT_SUMMARY,'sources':[],'steps':[],'warnings':[str(error)],'offers':[],'scope':scope,'model_transient':True})
         except ValueError as error:raise AgentServiceError(str(error))
     policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False
     def result():
@@ -203,11 +229,14 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
                 context={'task':'仅采集联系方式，不处理报价' if scope=='contacts' else '采集联系方式及目标模型报价','supplier_url':url,'rules':rules if scope=='all' else [],'step':index+1,'steps_remaining':max_steps-index,'known_contacts':records,'known_offers':offers,'history':steps[-6:],'warnings':warnings[-5:],'page':snapshot}
                 log('Agent 第 '+str(index+1)+' 步：观察 '+snapshot['url'])
                 try:
-                    raw=service.complete([{'role':'system','content':SYSTEM},{'role':'user','content':json.dumps(context,ensure_ascii=False)}])
+                    raw=service.complete([{'role':'system','content':SYSTEM},{'role':'user','content':json.dumps(prompt_context(context),ensure_ascii=False)}])
                     raw=re.sub(r'^```(?:json)?\s*|\s*```$','',raw.strip());decision=json.loads(raw)
-                    if not isinstance(decision,dict):raise ValueError('模型结果不是对象')
+                    if not isinstance(decision,dict) or not isinstance(decision.get('action') or {},dict) or not isinstance((decision.get('action') or {}).get('type',''),str):raise json.JSONDecodeError('模型结果不是有效对象',raw,0)
+                    for key in ['contacts','offers']:
+                        if not isinstance(decision.get(key),list):decision[key]=[]
                 except json.JSONDecodeError:
                     warnings.append('模型本轮未返回有效JSON');steps.append({'reason':'模型输出格式无效，需要重试'});continue
+                except ModelTransientError as error:raise ModelTransientSiteError(MODEL_TRANSIENT_SUMMARY+'：'+str(error))
                 except ValueError as error:raise AgentServiceError(str(error))
                 new,rejected=validate_contacts(decision.get('contacts',[]),observations);warnings.extend(rejected)
                 for item in new:
@@ -242,6 +271,8 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
                         for s in observations:
                             known.add(s['url'])
                             known.update(urllib.parse.urljoin(s['url'],c['href']) for c in s.get('controls',[]) if c.get('href'))
+                        if target not in known and target.endswith('…'):  # Prompt shortened a long href; accept a unique prefix match.
+                            matches=[k for k in known if k.startswith(target[:-1])];target=matches[0] if len(matches)==1 else target;action=dict(action,url=target)
                         if target not in known:raise ValueError('该网址未在已观察的页面链接中出现')
                         allow(target)
                     elif kind=='click':
@@ -269,6 +300,10 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
         except AgentServiceError as error:
             warnings.append(str(error));blocked=True
             error.partial=result()
+            raise
+        except ModelTransientSiteError as error:
+            warnings.append(str(error)[:400]);log(MODEL_TRANSIENT_SUMMARY)
+            if error.partial is None:error.partial=dict(result(),**({'contact_status':'incomplete'} if records else {}),contact_summary=(('已找到 '+str(len(records))+' 条联系线索；' if records else '')+MODEL_TRANSIENT_SUMMARY),model_transient=True)
             raise
         except Exception as error:blocked=True;warnings.append(str(error)[:400]);log('访问受阻：'+str(error)[:200])
         finally:
