@@ -110,9 +110,16 @@ class Store:
         item=dict(row)
         for key in ['contacts','offers','sources','warnings','contact_result']: item[key]=json.loads(item[key])
         return item
+    @staticmethod
+    def list_row(item):
+        records=item['contact_result'].get('contact_records') or []
+        if not any(record.get('qr_image') for record in records): return item
+        item['contact_result']=dict(item['contact_result'],contact_records=[{key:value for key,value in record.items() if key!='qr_image'} for record in records])
+        item['_summary']=True
+        return item
     def state(self):
         with self.lock,self.connect() as db:
-            return {'suppliers':[self.decode_row(r) for r in db.execute('SELECT * FROM suppliers ORDER BY id')],
+            return {'suppliers':[self.list_row(self.decode_row(r)) for r in db.execute('SELECT * FROM suppliers ORDER BY id')],
                 'rules':self.rules(),'events':[dict(r) for r in db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 300')],
                 'history':[dict(r,offers=json.loads(r['offers'])) for r in db.execute('SELECT * FROM history ORDER BY id DESC LIMIT 500')],
                 'drafts':[dict(r) for r in db.execute('SELECT * FROM drafts ORDER BY id DESC')], 'job':dict(self.job),
@@ -164,7 +171,7 @@ class Store:
             detail={key:result.get(key) for key in ['contact_records','contact_summary','steps','warnings','scope']}
             for key in ['contact_records','steps','warnings']:detail[key]=detail[key] or []
             for record in detail['contact_records']:record.setdefault('checked_at',now())
-            previous=(row['contact_result'].get('previous_contact_records') or [])+(row['contact_result'].get('contact_records') or [])
+            previous=[{key:value for key,value in record.items() if key!='qr_image'} for record in (row['contact_result'].get('previous_contact_records') or [])+(row['contact_result'].get('contact_records') or [])]
             detail['previous_contact_records']=list({(r.get('type'),r.get('value'),r.get('source_url'),r.get('evidence')):r for r in previous}.values())
             with self.connect() as db:
                 db.execute('UPDATE suppliers SET contacts=?,sources=?,contact_status=?,contact_checked_at=?,contact_result=? WHERE id=?',(encode(contacts),encode(sources),current,now(),encode(detail),sid))
@@ -319,6 +326,10 @@ class Handler(BaseHTTPRequestHandler):
         path=urlsplit(self.path).path; params=parse_qs(urlsplit(self.path).query); store=self.store
         try:
             if path=='/api/state': return self.send(store.state())
+            if path=='/api/supplier':
+                try: sid=int(params.get('id',[''])[0])
+                except ValueError: raise ValueError('供应商编号无效')
+                return self.send(store.get(sid))
             if path=='/api/export-contacts':
                 mode=params.get('mode',['real'])[0];output=io.StringIO();writer=csv.writer(output)
                 writer.writerow(['编号','网址','本轮联系状态','类型','联系方式','用途','来源','原文证据','风险/备注','最近检查'])
