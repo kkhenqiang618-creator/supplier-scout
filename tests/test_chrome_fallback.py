@@ -174,25 +174,30 @@ class SoftDeadlineTests(Harness):
         return result, events, calls
 
     def test_healthy_site_keeps_all_steps(self):
-        # Strong pages never tighten Moli to its weak budget. Full: 12*40=480 < 810-210. Contacts: step 8 starts at 7*20=140, 300-140 >= 110.
-        for scope, steps, seconds in [('all', 12, 15), ('all', 12, 25), ('all', 12, 40), ('contacts', 8, 5), ('contacts', 8, 14), ('contacts', 8, 20)]:
+        # Strong pages never tighten Moli to its weak budget. Full: 12*40=480 < 810-210. Contacts with nothing found extends 8 -> 12:
+        # 5s/14s steps fit all 12 (11*14=154 <= 310-110); at 20s steps 9-11 start at t=160..200 and the 12th (t=220) is refused.
+        for scope, steps, seconds, cut in [('all', 12, 15, False), ('all', 12, 25, False), ('all', 12, 40, False), ('contacts', 12, 5, False), ('contacts', 12, 14, False), ('contacts', 11, 20, True)]:
             with self.subTest(scope=scope, seconds=seconds):
                 result, events, calls = self.timed(scope, [PLAIN], [GOOD], seconds)
-                self.assertEqual(len(calls), steps); self.assertNotIn(browser_agent.SOFT_DEADLINE_WARNING, result['warnings']); self.assertNotIn(('start', 'Chrome'), events)
+                self.assertEqual(len(calls), steps); self.assertEqual(browser_agent.SOFT_DEADLINE_WARNING in result['warnings'], cut); self.assertNotIn(('start', 'Chrome'), events)
 
     def test_step_cap_per_scope_and_steps_remaining(self):
-        for scope, cap in [('contacts', 8), ('all', 12)]:
+        # Contacts with nothing found: 8 base steps counted down honestly, then the 4-step extension counted down on its own.
+        for scope, remaining in [('contacts', list(range(8, 0, -1)) + [4, 3, 2, 1]), ('all', list(range(12, 0, -1)))]:
             with self.subTest(scope=scope):
                 result, events, calls = self.timed(scope, [PLAIN], [GOOD], 1)
-                self.assertEqual(len(calls), cap); self.assertEqual([c['steps_remaining'] for c in calls], list(range(cap, 0, -1)))
+                self.assertEqual([c['steps_remaining'] for c in calls], remaining)
                 self.assertIn('达到本次单站动作预算，检查尚未完成，可单独继续', result['warnings'])
         self.assertEqual((browser_agent.CONTACTS_MAX_STEPS, browser_agent.MAX_STEPS), (8, 12))
 
     def test_chrome_retry_also_capped_at_eight_for_contacts(self):
-        # Moli PLAIN -> WEAK with nothing found triggers Chrome; each browser run gets its own 8-step cap.
+        # Moli PLAIN -> WEAK with nothing found triggers Chrome; each browser run gets its own 8-step cap (+4 when readable and nothing found).
         result, events, calls = self.timed('contacts', [PLAIN, WEAK], [GOOD], 1)
-        self.assertEqual(events.count(('start', 'Chrome')), 1); self.assertEqual(len(calls), 16)
-        self.assertEqual([s['browser'] for s in result['steps']].count('Chrome'), 8)
+        self.assertEqual(events.count(('start', 'Chrome')), 1); self.assertEqual(len(calls), 24)
+        self.assertEqual([s['browser'] for s in result['steps']].count('Chrome'), 12)
+        # Moli had one readable page, so it extended too (12 steps) before Chrome finds the contact on its first step and stops.
+        result, events, calls = self.timed('contacts', [PLAIN, WEAK], [GOOD], 1, [WAIT] * 12 + [FOUND])
+        self.assertEqual([s['browser'] for s in result['steps']].count('Chrome'), 1); self.assertEqual(len(calls), 13)
 
     def test_weak_page_tightens_moli_to_its_budget(self):
         # Full: steps at t=0,40,80,120 (360-160<210 stops at the 5th); Chrome then gets the rest of SITE_BUDGET.

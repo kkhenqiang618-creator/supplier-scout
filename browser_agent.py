@@ -352,20 +352,22 @@ SYSTEM='''你是供应商信息采集浏览器Agent。根据每一轮真实页�
 每轮输出JSON：{"reason":"选择下一步的简短中文依据","action":{"type":"click","ref":"c1"},"contacts":[{"type":"email/phone/wechat/qq/qq_group/wechat_link/official_account/telegram/discord/contact_form/online_service/qrcode/other","value":"真实原值或真实联系链接","purpose":"商务/客服/技术支持/待确认等","source_url":"实际来源页面","evidence":"逐字证据","risk_flags":[]}],"offers":[],"missing_information":[]}。
 contacts是本轮新发现，不重复输出已知项。缺失项写null或[]，不编造。只有本轮可核实的来源才提取；第三方平台和归属不明须标风险。
 全量模式才收集目标模型报价，model必须是传入规则model的一个值，保留model_name、input_price/output_price/cache_price、currency、unit、group、group_multiplier、resource_form、source、evidence、notes；price_text保留范围价和条件。不把分组倍率、充值折扣冒充官方目录折扣，ratio不能确认时为null。仅联系方式模式不要查看、提取或判断报价。
-上下文steps_remaining是本轮剩余观察次数（含本次）；次数少时优先页尾、联系/关于页、公告/铃铛、客服入口和二维码，再看文档或子站；steps_remaining为1时本次结果之后不再观察新页面，应提取已见渠道并finish。
+上下文steps_remaining是本轮剩余观察次数（含本次）；次数少时优先页尾、联系/关于页、公告/铃铛、客服入口和二维码，再看文档或子站；steps_remaining为1时本次结果之后不再观察新页面，应提取已见渠道并finish；仅当上下文may_extend为true、尚未找到任何联系方式且仍有未检查的联系入口时，可照常给出下一步动作（程序可能追加少量观察次数并重新告知steps_remaining）。
 当合理检查完或已找到足够可用渠道时finish；不要无止境翻页。若任务预算用尽，保留已有事实，说明未完成。'''
 
 SOFT_DEADLINE_WARNING='本站检查时间已用完，保留已核实的结果，可单独继续'
 CONTACT_HINT=re.compile(r'[^\s@]+@[^\s@]+\.[a-z]{2,}|微信|wechat|weixin|QQ|t\.me/|telegram|discord|电话|手机|tel:|mailto:|(?<!\d)1[3-9]\d{9}(?!\d)',re.I)
-def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=None,browser_factory=Browser,deadline=None,escalate_weak=False,clock=time.monotonic,weak_deadline=None):
-    """max_steps: model steps for this browser run (None -> the scope's cap, see site_budget).
+def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=None,browser_factory=Browser,deadline=None,escalate_weak=False,clock=time.monotonic,weak_deadline=None,extended_deadline=None):
+    """max_steps: model steps for this browser run (None -> the scope's cap, see site_budget; an explicit cap never extends).
+    Contacts-only: when the base cap is used up with zero verified contacts on a readable run, the same browser keeps going for up to
+    budget['extra_steps'] more steps, but only while extended_deadline (default: deadline) still leaves the step reserve.
     deadline: soft monotonic deadline; no new step starts with less than the scope's step reserve left. weak_deadline: the tighter deadline that
     applies once a page was weak (or the browser died) and nothing has been found, leaving time for the Chrome retry.
     escalate_weak: when the first page is render_weak and shows no contact-like text, one program-side wait (no model call);
     still weak -> end now so run_site can hand over to Chrome.
     Returns an internal _fallback={weak,dead,escalated} that run_site reads and removes."""
     if scope not in ['all','contacts']:raise ValueError('采集模式无效')
-    budget=site_budget(scope);reserve=budget['reserve'];max_steps=budget['max_steps'] if max_steps is None else max_steps
+    budget=site_budget(scope);reserve=budget['reserve'];extra=budget['extra_steps'] if max_steps is None else 0;max_steps=budget['max_steps'] if max_steps is None else max_steps
     service=model_service if isinstance(model_service,ModelService) else ModelService(model_service)
     if not service.public()['configured']:raise AgentServiceError('请先配置 API URL、模型名和 API Key')
     validate_url(url)
@@ -374,10 +376,17 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
         try:service.test()
         except ModelTransientError as error:raise ModelTransientSiteError(MODEL_TRANSIENT_SUMMARY+'：'+str(error),{'contacts':{},'contact_records':[],'contact_status':'incomplete','contact_summary':MODEL_TRANSIENT_SUMMARY,'sources':[],'steps':[],'warnings':[str(error)],'offers':[],'scope':scope,'model_transient':True})
         except ValueError as error:raise AgentServiceError(str(error))
-    policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False;weak=[];fallback={'weak':False,'dead':False,'escalated':False};unreadable={}
+    policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False;weak=[];fallback={'weak':False,'dead':False,'escalated':False};unreadable={};extended=False;robots_refused=False
     label=getattr(browser_factory,'label','Moli');method=label+' 浏览器 Agent'
     def current_deadline():
-        return weak_deadline if weak_deadline is not None and fallback['weak'] and not records else deadline
+        if weak_deadline is not None and fallback['weak'] and not records:return weak_deadline
+        return (extended_deadline if extended_deadline is not None else deadline) if extended else deadline
+    def can_extend():
+        # Readable: some observed page rendered properly, no robots refusal and a live browser (a dead one never reaches here).
+        if not extra or records or fallback['dead'] or robots_refused:return False
+        if not any(not (s.get('render_weak') or s.get('page_unresponsive') or s.get('goto_timeout')) for s in observations):return False
+        limit=weak_deadline if weak_deadline is not None and fallback['weak'] else extended_deadline if extended_deadline is not None else deadline
+        return limit is None or limit-clock()>=reserve
     def result():
         # Weak only if no observation rendered properly: one short subpage after a good homepage is not a Moli failure.
         site_weak=bool(weak) and not any(not s.get('render_weak') for s in observations)
@@ -408,7 +417,13 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                 log(label+' 首页渲染不完整，先等待页面加载（不调用模型）')
                 snapshot=browser.command({'type':'wait'})['snapshot']
                 steps.append({'step':0,'url':snapshot['url'],'action':'wait','reason':'首页渲染不完整，程序自动等待一次','contacts_found':0,'browser':label})
-            for index in range(max_steps):
+            cap=max_steps;index=-1
+            while True:
+                index+=1
+                if index>=cap:
+                    if index!=max_steps or not can_extend():break
+                    extended=True;cap=max_steps+extra;notice=label+' 前 '+str(max_steps)+' 步未找到联系方式，继续查找最多 '+str(extra)+' 步（共 '+str(cap)+' 步）'
+                    log(notice);warnings.append(notice)
                 observations.append(snapshot)
                 if escalate_weak and index==0 and snapshot.get('render_weak') and not CONTACT_HINT.search(observed_text(snapshot)):
                     weak.append(snapshot.get('url'));fallback.update(weak=True,escalated=True)
@@ -421,7 +436,9 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                 if current_deadline() is not None and current_deadline()-clock()<reserve:
                     warnings.append(SOFT_DEADLINE_WARNING);log(SOFT_DEADLINE_WARNING);finished=True;break
                 valid_sources={s['url']:observed_text(s) for s in observations}
-                context={'task':'仅采集联系方式，不处理报价' if scope=='contacts' else '采集联系方式及目标模型报价','supplier_url':url,'rules':rules if scope=='all' else [],'step':index+1,'steps_remaining':max_steps-index,'known_contacts':records,'known_offers':offers,'history':steps[-6:],'warnings':warnings[-5:],'page':snapshot}
+                context={'task':'仅采集联系方式，不处理报价' if scope=='contacts' else '采集联系方式及目标模型报价','supplier_url':url,'rules':rules if scope=='all' else [],'step':index+1,'steps_remaining':cap-index,'known_contacts':records,'known_offers':offers,'history':steps[-6:],'warnings':warnings[-5:],'page':snapshot}
+                # Only the last base step of a run that could still extend may skip finish; full scope (extra=0) and refused extensions never see it.
+                if index==max_steps-1 and not extended and can_extend():context['may_extend']=True
                 log('Agent 第 '+str(index+1)+' 步：观察 '+snapshot['url'])
                 try:
                     raw=service.complete([{'role':'system','content':SYSTEM},{'role':'user','content':json.dumps(prompt_context(context),ensure_ascii=False)}])
@@ -457,7 +474,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                         identity=(offer.get('model_name'),offer.get('group'),source,offer.get('price_text'),offer.get('input_price'),offer.get('output_price'))
                         if not any((o.get('model_name'),o.get('group'),o.get('source'),o.get('price_text'),o.get('input_price'),o.get('output_price'))==identity for o in offers):offers.append(offer)
                 action=decision.get('action') or {};kind=action.get('type');reason=str(decision.get('reason') or '')[:300]
-                step={'step':index+1,'url':snapshot['url'],'action':kind,'reason':reason,'contacts_found':len(records),'browser':label};steps.append(step)
+                step={'step':index+1,'url':snapshot['url'],'action':kind,'reason':reason,'contacts_found':len(records),'browser':label,**({'extended':True} if index>=max_steps else {})};steps.append(step)
                 log(reason+'；已找到 '+str(len(records))+' 条联系线索')
                 if kind=='finish':finished=True;break
                 try:
@@ -491,6 +508,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                     snapshot=browser.command(clean)['snapshot']
                 except BrowserDeadError:raise
                 except Exception as error:
+                    if 'robots.txt' in str(error):robots_refused=True
                     warnings.append(str(error)[:400]);blocked=True;log('本步受阻：'+str(error)[:200])
             if not finished:warnings.append('达到本次单站动作预算，检查尚未完成，可单独继续')
         except AgentServiceError as error:
@@ -519,14 +537,21 @@ MOLI_BUDGET=360;SITE_BUDGET=810;STEP_RESERVE=210;MAX_STEPS=12
 # Contacts-only mode (phase 3 plan B): production data (37 sites, 47 contacts) keeps 87% of contacts at 8 steps per run, median 5s and
 # P90 14s per step. Last step may start at 300-110=190s: a normal 8-step run (8 x 5-14s = 40-112s, plus launch/open ~10-20s) fits well
 # inside that; worst case 190+275=465s still ends before the 480s hard timeout.
+# Extension (contacts only): a readable run with zero verified contacts after its 8 steps may take up to 4 more in the same browser.
+# Hard rule: the last step must start by deadline - reserve and still end inside 480s with the ~275s worst tail, so the extended soft
+# deadline E needs E - 110 + 275 <= 480, i.e. E <= 315. E=310 keeps 5s for the subprocess start before run_site's clock begins
+# (310-110+275=475). So extra steps may start until t=200 instead of 190: the strict math adds only 10s of start window, and the
+# extension really runs on time already left over. Typical steps are 5-14s, so 8 steps end at ~50-130s and 4 more fit easily; a slow site
+# simply stops on the per-step reserve check (SOFT_DEADLINE_WARNING) with its verified results kept. Base steps keep the 300s deadline,
+# so run_site's Chrome gate (reserve + BROWSER_STARTUP before site_end) is unchanged; Chrome gets its own 8 (+4) under the same rules.
 # Weak page with nothing found: Moli stops at 150-110=40s of steps, so Chrome keeps most of the budget. A browser run spends up to
 # BROWSER_STARTUP (launch READY_TIMEOUT 20s + first open COMMAND_TIMEOUT 30s) before its first deadline check, so Chrome (and the Moli
 # re-run after a failed Chrome) starts only with reserve + BROWSER_STARTUP left (contacts 160s, full 260s); otherwise it could not take a step.
-CONTACTS_MOLI_BUDGET=150;CONTACTS_SITE_BUDGET=300;CONTACTS_STEP_RESERVE=110;CONTACTS_MAX_STEPS=8
+CONTACTS_MOLI_BUDGET=150;CONTACTS_SITE_BUDGET=300;CONTACTS_STEP_RESERVE=110;CONTACTS_MAX_STEPS=8;CONTACTS_EXTRA_STEPS=4;CONTACTS_EXTENDED_BUDGET=310;WORST_TAIL=275
 BROWSER_STARTUP=READY_TIMEOUT+COMMAND_TIMEOUT
 def site_budget(scope):
-    if scope=='contacts':return {'max_steps':CONTACTS_MAX_STEPS,'moli':CONTACTS_MOLI_BUDGET,'site':CONTACTS_SITE_BUDGET,'reserve':CONTACTS_STEP_RESERVE}
-    return {'max_steps':MAX_STEPS,'moli':MOLI_BUDGET,'site':SITE_BUDGET,'reserve':STEP_RESERVE}
+    if scope=='contacts':return {'max_steps':CONTACTS_MAX_STEPS,'extra_steps':CONTACTS_EXTRA_STEPS,'moli':CONTACTS_MOLI_BUDGET,'site':CONTACTS_SITE_BUDGET,'extended':CONTACTS_EXTENDED_BUDGET,'reserve':CONTACTS_STEP_RESERVE}
+    return {'max_steps':MAX_STEPS,'extra_steps':0,'moli':MOLI_BUDGET,'site':SITE_BUDGET,'extended':SITE_BUDGET,'reserve':STEP_RESERVE}
 CHROME_RETRIED='Moli 渲染不完整，已改用 Chrome 重试'
 NO_CHROME_WARNING='未安装 Chrome 备用浏览器，仅使用 Moli'
 BOTH_WEAK_SUMMARY='Moli 与 Chrome 均未能完整渲染页面，未能判定联系方式，可稍后重试'
@@ -565,11 +590,11 @@ def merge_results(moli,chrome):
 def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browser,chrome_factory=ChromeBrowser,clock=time.monotonic,chrome_ready=chrome_available):
     """Moli first; at most one Chrome retry (started only after Moli's browser is closed by run_agent's finally).
     Moli keeps the whole budget unless a page turns weak with nothing found; then it stops at the scope's Moli budget to leave Chrome its time.
-    Budgets come from site_budget(scope): contacts-only runs are shorter (8 steps per browser run, ~5 min); full mode keeps 12 steps / 810s."""
+    Budgets come from site_budget(scope): contacts-only runs are shorter (8 steps per browser run, +4 if nothing found yet, ~5 min); full mode keeps 12 steps / 810s."""
     budget=site_budget(scope);reserve=budget['reserve'];startup=reserve+BROWSER_STARTUP
-    start=clock();site_end=start+budget['site'];enabled=chrome_enabled();missing=enabled and not chrome_ready();enabled=enabled and not missing
+    start=clock();site_end=start+budget['site'];extended_end=start+budget['extended'];enabled=chrome_enabled();missing=enabled and not chrome_ready();enabled=enabled and not missing
     def moli_run(escalate):
-        result=run_agent(url,scope,service,rules,log,browser_factory=moli_factory,deadline=site_end,weak_deadline=start+budget['moli'] if escalate else None,escalate_weak=escalate,clock=clock)
+        result=run_agent(url,scope,service,rules,log,browser_factory=moli_factory,deadline=site_end,weak_deadline=start+budget['moli'] if escalate else None,escalate_weak=escalate,clock=clock,extended_deadline=extended_end)
         if missing:result['warnings'].append(NO_CHROME_WARNING)
         return result
     def only_moli(result,warning=None):
@@ -591,7 +616,7 @@ def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browse
     if not enabled or not needs_chrome(moli):return only_moli(moli)
     if site_end-clock()<startup:return only_moli(moli,'本站剩余时间不足，未启动 Chrome 备用浏览器')
     log('Moli 未能完整读取页面，改用 Chrome 备用浏览器重试')
-    try:chrome=run_agent(url,scope,service,rules,log,browser_factory=chrome_factory,deadline=site_end,clock=clock)
+    try:chrome=run_agent(url,scope,service,rules,log,browser_factory=chrome_factory,deadline=site_end,clock=clock,extended_deadline=extended_end)
     except ModelTransientSiteError as error:return only_moli(moli,'Chrome 备用浏览器未完成：'+str(error)[:300])
     except AgentServiceError as error:
         error.partial=merge_results(strip_internal(moli),strip_internal(error.partial or {}));raise
