@@ -18,6 +18,13 @@ class SelectionTests(unittest.TestCase):
                 row(6, mode='demo', contact_status='blocked')]
         self.assertEqual([r['id'] for r in select_rows(rows, 'real', selection='blocked')], [1, 3, 4])
 
+    def test_blocked_keeps_rows_that_retained_older_contacts(self):
+        # A recheck that could not confirm new contacts keeps the old ones and marks needs_review;
+        # it must still be retryable, otherwise the site silently drops out of every batch.
+        rows = [row(1, status='review', contact_status='needs_review'),
+                row(2, status='qualified', contact_status='found')]
+        self.assertEqual([r['id'] for r in select_rows(rows, 'real', selection='blocked')], [1])
+
     def test_remaining_all_only_takes_never_checked_rows(self):
         rows = [row(1), row(2, status='review', contact_status='found'), row(3, status='skipped')]
         self.assertEqual([r['id'] for r in select_rows(rows, 'real', scope='all', selection='remaining')], [1])
@@ -48,6 +55,19 @@ class BlockedBatchTests(unittest.TestCase):
         target = next(r for r in self.store.state()['suppliers'] if not r['contacts'])
         self.store.save_contacts(target['id'], {'contacts': {}, 'contact_records': [], 'contact_status': 'blocked',
                                                 'contact_summary': '访问受阻'})
+        job = self.store.start_job('demo', selection='blocked')
+        self.assertEqual(job['total'], 1)
+        self.store.job_thread.join(timeout=10)
+        self.assertFalse(self.store.job['running'])
+
+    def test_blocked_batch_retries_a_recheck_that_kept_older_contacts(self):
+        target = next(r for r in self.store.state()['suppliers'] if not r['contacts'])
+        self.store.save_contacts(target['id'], {'contacts': {'email': ['old@example.com']},
+                                                'contact_records': [], 'contact_status': 'found'})
+        self.store.save_contacts(target['id'], {'contacts': {}, 'contact_records': [],
+                                                'contact_status': 'blocked', 'contact_summary': '访问受阻'})
+        kept = next(r for r in self.store.state()['suppliers'] if r['id'] == target['id'])
+        self.assertEqual(kept['contact_status'], 'needs_review')
         job = self.store.start_job('demo', selection='blocked')
         self.assertEqual(job['total'], 1)
         self.store.job_thread.join(timeout=10)

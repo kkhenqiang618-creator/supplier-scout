@@ -9,6 +9,14 @@ test('emails awaiting quote review are eligible; explicitly skipped remain opt-i
  assert.equal(W.emailEligible(rows[0]),true);assert.equal(W.emailEligible(rows[1]),false);assert.equal(W.emailEligible(rows[1],true),true);
  assert.equal(W.emailEligible({...rows[0],contacts:{email:['not-email']}}),false);
 });
+test('a recheck that kept older contacts still counts as retryable',()=>{
+ assert.equal(W.needsRetry({status:'review',contact_status:'needs_review'}),true);
+ assert.equal(W.needsRetry({status:'review',contact_status:'blocked'}),true);
+ assert.equal(W.needsRetry({status:'review',contact_status:'incomplete'}),true);
+ assert.equal(W.needsRetry({status:'error',contact_status:'not_started'}),true);
+ assert.equal(W.needsRetry({status:'qualified',contact_status:'found'}),false);
+ assert.equal(W.needsRetry({status:'pending',contact_status:'not_started'}),false);
+});
 test('saved contact progress determines placement independently from price status',()=>{
  assert.equal(W.inFollowup(rows[0],{}),false);assert.equal(W.inFollowup(rows[0],{'4':{status:'waiting'}}),true);
  assert.equal(W.inFollowup(rows[0],{'9':{status:'done'}}),false);

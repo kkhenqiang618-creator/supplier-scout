@@ -30,12 +30,14 @@ ROOT=Path(__file__).resolve().parent
 def now(): return datetime.now(timezone.utc).isoformat(timespec='seconds')
 def encode(value): return json.dumps(value,ensure_ascii=False,allow_nan=False)
 SELECTIONS=['remaining','all','blocked']
+BLOCKED_CONTACT_STATUSES=('blocked','incomplete','needs_review')
 
 def select_rows(rows,mode,ids=None,scope='all',selection='remaining'):
     """Pick the rows one batch should process.
     remaining: never-finished rows only (or every demo row, as before).
-    blocked: rows whose last contact check was blocked or incomplete, plus error rows, so a
-    failed batch can be retried without re-running the whole list.
+    blocked: rows whose last contact check was blocked, incomplete, or could not be confirmed
+    (needs_review keeps older contacts), plus error rows, so a failed batch can be retried
+    without re-running the whole list.
     ids: an explicit list wins over the other selections (single row / checkbox retry)."""
     picked=[]
     for row in rows:
@@ -44,7 +46,7 @@ def select_rows(rows,mode,ids=None,scope='all',selection='remaining'):
             if row['id'] in ids: picked.append(row)
         elif selection=='all': picked.append(row)
         elif selection=='blocked':
-            if row['status']=='error' or row['contact_status'] in ('blocked','incomplete'): picked.append(row)
+            if row['status']=='error' or row['contact_status'] in BLOCKED_CONTACT_STATUSES: picked.append(row)
         elif mode=='demo': picked.append(row)
         elif scope=='contacts':
             if row['contact_status']!='found': picked.append(row)

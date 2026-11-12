@@ -6,6 +6,7 @@
  function identity(row){const name=String(row.name||'').trim();let host=row.url;try{host=new URL(row.url).host}catch{}return {number:/^\d+$/.test(name)?name:String(row.id),name:/^\d+$/.test(name)?'':name,host};}
  function emailEligible(row,includeSkipped=false){return (row.contacts?.email||[]).some(v=>EMAIL.test(v))&&(includeSkipped||!(row.status==='skipped'&&String(row.reason||'').startsWith('人工复核：')));}
  function inFollowup(row,followups){return Boolean(followLabels[followups?.[row.id]?.status]);}
+ function needsRetry(row){return row.status==='error'||['blocked','incomplete','needs_review'].includes(row.contact_status);}
  function resource(value){return ({'自部署':'self','自部署/运营商':'self','运营商':'self',self_deployed:'self','官key':'key','官 key':'key',official_key:'key','官转':'official','官转聚合':'official',official_transfer:'official'})[value]||'unknown';}
  const modelKey=value=>String(value||'').toLowerCase().replace(/[\s_\-.（）()]/g,'');
  function models(data){
@@ -43,7 +44,7 @@
   }
   return {bins,unknown,comparable};
  }
- const core={identity,emailEligible,inFollowup,resource,models,matching,discount,distribution};
+ const core={identity,emailEligible,inFollowup,needsRetry,resource,models,matching,discount,distribution};
  if(typeof module!=='undefined'&&module.exports)module.exports=core;
  if(typeof document==='undefined')return;
  window.ScoutWorkspace=core;
@@ -73,10 +74,10 @@
  }
  function contactsPage(){
   const initial=currentInitial();
-  const tasks=[['all','待处理'],['todo_manual','待联系'],['todo_email','可邮件联系'],['todo_price','报价待复核'],['todo_contact','线索待补查']];
-  const all=initial.filter(r=>(filter==='all'||matchesTask(r,filter))&&(!search||`${r.id} ${r.name} ${r.url} ${JSON.stringify(r.contacts)}`.toLowerCase().includes(search.toLowerCase())));
+  const tasks=[['all','待处理'],['blocked','受阻 / 未查清'],['todo_manual','待联系'],['todo_email','可邮件联系'],['todo_price','报价待复核'],['todo_contact','线索待补查']];
+  const all=initial.filter(r=>(filter==='all'||(filter==='blocked'?needsRetry(r):matchesTask(r,filter)))&&(!search||`${r.id} ${r.name} ${r.url} ${JSON.stringify(r.contacts)}`.toLowerCase().includes(search.toLowerCase())));
   const footer=pager(all.length),shown=all.slice((pageNo-1)*15,pageNo*15);
-  return heading('联系与复核','先核实线索、完成首次联系；保存联系记录后进入后续处理。',importButton()+runButton(),'CONTACT & REVIEW')+notice()+shortProgress()+panel('联系线索与待办',`<div class="ws-tabs">${tasks.map(([key,label])=>`<button data-filter="${key}" class="filter ${filter===key?'active':''}">${label} <b>${initial.filter(r=>key==='all'||matchesTask(r,key)).length}</b></button>`).join('')}</div><div class="table-tools"><label class="search">${I('search')}<input id="ws-contact-search" value="${esc(search)}" placeholder="搜索编号、网址或联系方式" aria-label="搜索联系待办"></label><button class="text-btn" data-nav="followup">查看已联系网站 ${I('arrow')}</button></div><div class="table-scroll"><table class="ws-contact-table"><thead><tr><th>编号 / 网站</th><th>联系渠道 / 用途</th><th>待处理事项</th><th>操作</th></tr></thead><tbody>${shown.map(r=>`<tr><td>${site(r)}</td><td>${contactColumn(r)}</td><td>${stageBadges(r)}<small class="ws-muted ws-clamp">${esc(r.contact_result?.contact_summary||'')}</small></td><td><div class="ws-actions">${Object.values(r.contacts||{}).some(v=>v.length)?recordButton(r):`<button class="btn small" data-agent-retry="${r.id}">继续查找</button>`}${followupStages(r).some(s=>s.key==='todo_price')||r.status==='review'?reviewButton(r):''}</div></td></tr>`).join('')||'<tr><td colspan="4" class="empty">当前暂无匹配待办；已联系的网站在“后续处理”中。</td></tr>'}</tbody></table></div>${footer}`,`<a class="text-btn" href="/api/export-contacts?mode=${mode}">导出联系方式</a>`);
+  return heading('联系与复核','先核实线索、完成首次联系；保存联系记录后进入后续处理。',importButton()+runButton(),'CONTACT & REVIEW')+notice()+shortProgress()+panel('联系线索与待办',`<div class="ws-tabs">${tasks.map(([key,label])=>`<button data-filter="${key}" class="filter ${filter===key?'active':''}">${label} <b>${initial.filter(r=>key==='all'||(key==='blocked'?needsRetry(r):matchesTask(r,key))).length}</b></button>`).join('')}</div><div class="table-tools"><label class="search">${I('search')}<input id="ws-contact-search" value="${esc(search)}" placeholder="搜索编号、网址或联系方式" aria-label="搜索联系待办"></label><button class="text-btn" data-nav="followup">查看已联系网站 ${I('arrow')}</button><div class="picked-bar" ${picked.size?'hidden':''}><span>已选 ${picked.size} 家</span><button class="btn small primary" data-action="run-picked">${I('play')}重采选中</button><button class="text-btn" data-action="clear-picked">清空</button></div></div><div class="table-scroll"><table class="ws-contact-table"><thead><tr><th class="pick-cell"><input type="checkbox" id="pick-page" aria-label="全选本页" ${shown.length&&shown.every(r=>picked.has(r.id))?'checked':''}"></th><th>编号 / 网站</th><th>联系渠道 / 用途</th><th>待处理事项</th><th>操作</th></tr></thead><tbody>${shown.map(r=>`<tr><td class="pick-cell"><input type="checkbox" class="pick-row" data-pick="${r.id}" ${picked.has(r.id)?'checked':''} aria-label="选择 ${esc(r.name)}"></td><td>${site(r)}</td><td>${contactColumn(r)}</td><td>${stageBadges(r)}<small class="ws-muted ws-clamp">${esc(r.contact_result?.contact_summary||'')}</small></td><td><div class="ws-actions">${Object.values(r.contacts||{}).some(v=>v.length)?recordButton(r):`<button class="btn small" data-agent-retry="${r.id}">继续查找</button>`}${followupStages(r).some(s=>s.key==='todo_price')||r.status==='review'?reviewButton(r):''}</div></td></tr>`).join('')||'<tr><td colspan="5" class="empty">当前暂无匹配待办；已联系的网站在“后续处理”中。</td></tr>'}</tbody></table></div>${footer}`,`<a class="text-btn" href="/api/export-contacts?mode=${mode}">导出联系方式</a>`);
  }
  function followupPage(){
   const allRows=rows().filter(r=>inFollowup(r,follow()));
