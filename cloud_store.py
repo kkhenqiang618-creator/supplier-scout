@@ -85,6 +85,9 @@ class CloudModelService(ModelService):
     def _finish_test(self,config,original_model,answer):
         with self.lock,self.database.transaction(write=True):
             return super()._finish_test(config,original_model,answer)
+    def _fail_test(self,config):
+        with self.lock,self.database.transaction(write=True):
+            return super()._fail_test(config)
     def snapshot(self):
         config=self.read()
         if not config.get('base_url') or not config.get('model') or not config.get('api_key'):raise ValueError('请先为当前账号填写 API URL、模型名和 API Key')

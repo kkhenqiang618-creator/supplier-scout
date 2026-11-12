@@ -10,6 +10,8 @@ import tempfile
 import time
 import threading
 import uuid
+import queue
+from datetime import datetime, timezone
 from pathlib import Path
 import urllib.request
 import urllib.error
@@ -24,8 +26,9 @@ class ModelTransientError(ValueError):
 PAGE_REJECTED=re.compile(r'context[ _-]?length|context window|maximum context|too many tokens|token limit|max_tokens|prompt is too long|input is too long|content[ _-]?(policy|filter|management)|moderation|safety|sensitive|敏感|违规|上下文|长度超',re.I)
 RETRY_DELAYS=[2,6];RETRY_AFTER_CAP=30;RETRY_WAIT_CAP=40  # Total sleep stays bounded; the parent stop path kills the worker process group.
 REQUEST_TIMEOUT=45
+TEST_NETWORK_TIMEOUT=65  # Whole interactive network phase, leaving time for DB persistence in a 120s function.
 NETWORK_PHASES={'request','connect','tls'}  # Failed before the model saw the request: one retry, then report the egress problem.
-PHASE_TEXT={'request':'连接或上传请求超时（云端网络出口问题，不是模型响应慢）','response':'等待模型响应超时','tls':'TLS 握手失败或超时'}
+PHASE_TEXT={'request':'连接或上传请求超时（尚未收到模型响应，需检查网络线路或服务商连接）','response':'等待模型响应超时','tls':'TLS 握手失败或超时'}
 
 def failure_phase(error):
     """urllib wraps everything raised inside h.request() (connect, TLS, sending the body) in URLError; getresponse/read errors surface bare."""
@@ -95,7 +98,7 @@ class ModelService:
         return data
     def public(self):
         data=self.read();key_error=data.get('key_error','')
-        return {'base_url':data.get('base_url',''),'model':data.get('model',''),'key_configured':bool(data.get('api_key')),'configured':bool(data.get('base_url') and data.get('model')),'tested':bool(data.get('tested')) and not key_error,'key_protected':bool(data.get('key_protected')),'key_error':key_error}
+        return {'base_url':data.get('base_url',''),'model':data.get('model',''),'key_configured':bool(data.get('api_key')),'configured':bool(data.get('base_url') and data.get('model')),'tested':bool(data.get('tested')) and not key_error,'key_protected':bool(data.get('key_protected')),'key_error':key_error,'last_test_status':data.get('last_test_status',''),'last_test_at':data.get('last_test_at','')}
     def save(self,data):
         url=str(data.get('base_url','')).strip().rstrip('/');model=str(data.get('model','')).strip();parts=urlsplit(url)
         if parts.scheme not in ['http','https'] or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment: raise ValueError('请填写模型服务的 API 地址，例如 https://服务域名/v1')
@@ -164,18 +167,47 @@ class ModelService:
         config=self.read()
         if config.get('key_error'):raise ModelConfigError(config['key_error']+'；请重新填写 API Key 后再测试')
         original_model=config.get('model')
+        replies=queue.Queue(maxsize=1);cancelled=threading.Event()
+        # urllib's socket timeout is not a total deadline (a trickling response
+        # can outlive it). Only network work runs here; the caller alone persists
+        # results. A late response can never mark a timed-out test successful.
+        def network():
+            candidate=dict(config)
+            try:
+                try:
+                    available=self.models(candidate)
+                    matches=[name for name in available if name.casefold()==str(original_model).casefold()]
+                    if original_model not in available and len(matches)==1:candidate['model']=matches[0]
+                except Exception:pass  # Some compatible services do not expose /models.
+                if cancelled.is_set():return
+                messages=[{'role':'user','content':'只回复 OK，验证连接。'}]
+                try:answer=self.complete(messages,config=candidate,attempts=1)
+                except ModelTransientError as error:
+                    if error.phase not in NETWORK_PHASES or cancelled.is_set():raise
+                    answer=self.complete(messages,config=candidate,attempts=1)
+                replies.put((candidate,answer,None))
+            except Exception as error:replies.put((candidate,None,error))
+        threading.Thread(target=network,daemon=True).start()
         try:
-            available=self.models(config)
-            matches=[name for name in available if name.casefold()==str(original_model).casefold()]
-            if original_model not in available and len(matches)==1:config=dict(config,model=matches[0])
-        except Exception:pass  # Some compatible services do not expose /models.
-        answer=self.complete([{'role':'user','content':'只回复 OK，验证连接。'}],config=config,attempts=1)  # Interactive path stays within the 120s function limit.
-        return self._finish_test(config,original_model,answer)
+            try:candidate,answer,error=replies.get(timeout=TEST_NETWORK_TIMEOUT)
+            except queue.Empty:raise ModelTransientError('模型连接测试总时限已用完，请稍后重试',phase='test_deadline') from None
+            if error:raise error
+        except Exception:
+            cancelled.set()
+            self._fail_test(config)
+            raise
+        finally:cancelled.set()
+        return self._finish_test(candidate,original_model,answer)
+    def _fail_test(self,config):
+        with self.lock:
+            current=self.read()
+            if current.get('revision')!=config.get('revision'):return
+            current.update(tested=False,last_test_status='failed',last_test_at=datetime.now(timezone.utc).isoformat());self._write(current)
     def _finish_test(self,config,original_model,answer):
         with self.lock:
             current=self.read()
             if current.get('revision')!=config.get('revision'):raise ValueError('测试期间配置已变更，请为当前配置重新测试连接')
-            current.update(tested=True,model=config['model'],base_url=api_base(config['base_url']));self._write(current)
+            current.update(tested=True,model=config['model'],base_url=api_base(config['base_url']),last_test_status='passed',last_test_at=datetime.now(timezone.utc).isoformat());self._write(current)
         return {'ok':True,'reply':answer[:200],'model':config['model'],'model_adjusted':original_model!=config['model']}
     def _write(self,data):
         data={key:value for key,value in data.items() if key not in ('key_error','key_protected')}
