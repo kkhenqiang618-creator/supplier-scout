@@ -356,7 +356,7 @@ class Handler(BaseHTTPRequestHandler):
                 sid=int(params.get('id',['0'])[0]); row=store.get(sid)
                 with store.connect() as db: saved=db.execute('SELECT * FROM drafts WHERE supplier_id=?',(sid,)).fetchone()
                 return self.send(make_draft(row,saved['subject'] if saved else None,saved['body'] if saved else None),ctype='message/rfc822',filename='inquiry-'+str(sid)+'.eml')
-            name={'/':'index.html','/app.js':'app.js','/admin.js':'admin.js','/style.css':'style.css','/favicon.svg':'favicon.svg'}.get(path)
+            name={'/':'index.html','/app.js':'app.js','/admin.js':'admin.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/vendor/qrcode.js':'vendor/qrcode.js'}.get(path)
             if name:
                 mime={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'}[Path(name).suffix]
                 return self.send((ROOT/'static'/name).read_bytes(),ctype=mime)
