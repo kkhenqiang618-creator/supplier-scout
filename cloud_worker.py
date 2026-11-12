@@ -42,7 +42,24 @@ def egress_report(path):
     return '云端自检：代理变量 '+('已设置 '+'、'.join(names) if names else '未设置')+'；'+(host or '未知主机')+' 解析为 '+dns
 
 
+SELF_CHECK_DELAYS=[60,120]  # Waits between self-check rounds after a network-phase failure; 3 rounds in total.
+
+
 def self_check(store,job,owner,log,stop=None):
+    """Retry network-phase self-check failures (egress to the model host is intermittent); config errors and success return at once."""
+    for round_index in range(len(SELF_CHECK_DELAYS)+1):
+        failure=self_check_once(store,job,owner,log,stop)
+        if not failure or failure[0]!='egress':return failure
+        if round_index>=len(SELF_CHECK_DELAYS):
+            return 'egress',failure[1].replace('；批次未开始','；已自检 '+str(round_index+1)+' 次均未连通，批次未开始',1)
+        delay=SELF_CHECK_DELAYS[round_index]
+        log('云端自检：第 '+str(round_index+1)+' 次未连通，'+str(delay)+' 秒后重试（共 '+str(len(SELF_CHECK_DELAYS)+1)+' 次）')
+        if stop is not None:
+            if stop.wait(delay):raise CollectionCancelled()
+        else:time.sleep(delay)
+
+
+def self_check_once(store,job,owner,log,stop=None):
     """Prove this daemon process can reach the model before touching any supplier; returns None or (kind, message)."""
     with tempfile.TemporaryDirectory(prefix='scout-selfcheck-') as folder:
         try:path=store.model_service.materialize(folder,snapshot=job['state'].get('_model_config',''))

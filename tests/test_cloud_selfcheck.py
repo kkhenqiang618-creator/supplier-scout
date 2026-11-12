@@ -21,7 +21,7 @@ class CloudSelfCheckTests(unittest.TestCase):
         @contextlib.contextmanager
         def fenced(*args):yield MagicMock(),{'cancel_requested':False}
         store.fenced=fenced;return store
-    def run_job(self,store,probes,mode='real'):
+    def run_job(self,store,probes,mode='real',delays=(0,0),shutdown=None):
         import cloud_worker
         outcomes=iter(probes);seen=[];sites=[]
         def complete(service,messages,config=None,attempts=3):
@@ -30,23 +30,24 @@ class CloudSelfCheckTests(unittest.TestCase):
             return outcome
         def collect(url,log,stop,scope,path,rules):sites.append(url);return {'contacts':{},'sources':[],'contact_status':'incomplete'}
         job={'id':'job','position':0,'supplier_ids':[1,2],'mode':mode,'scope':'contacts','state':{'_model_config':'x'}}
-        with patch.object(cloud_worker.ModelService,'complete',complete),patch.object(cloud_worker,'collect_site',side_effect=collect),patch.object(cloud_worker.socket,'getaddrinfo',return_value=[(2,1,6,'',('203.0.113.7',443))]),patch.dict(os.environ,{'HTTPS_PROXY':PROXY}),patch.object(cloud_worker.time,'sleep'):
-            cloud_worker.execute_job(store,job,'lease',threading.Event())
+        with patch.object(cloud_worker.ModelService,'complete',complete),patch.object(cloud_worker,'collect_site',side_effect=collect),patch.object(cloud_worker.socket,'getaddrinfo',return_value=[(2,1,6,'',('203.0.113.7',443))]),patch.dict(os.environ,{'HTTPS_PROXY':PROXY}),patch.object(cloud_worker.time,'sleep'),patch.object(cloud_worker,'SELF_CHECK_DELAYS',list(delays)):
+            cloud_worker.execute_job(store,job,'lease',shutdown or threading.Event())
         events=[c.args[0] for c in store.event.call_args_list]+[c.args[2] for c in store.progress.call_args_list]
         return seen,sites,events
     def request_timeout(self):
         from model_service import ModelTransientError
         return ModelTransientError('模型服务调用失败：连接或上传请求超时（云端网络出口问题，不是模型响应慢）：timed out',phase='request')
     def test_small_probe_failure_fails_job_before_any_site(self):
-        store=self.store();seen,sites,events=self.run_job(store,[self.request_timeout()])
-        self.assertEqual(sites,[]);self.assertEqual(len(seen),1);self.assertEqual(seen[0][1],1)
+        store=self.store();seen,sites,events=self.run_job(store,[self.request_timeout()]*3)
+        self.assertEqual(sites,[]);self.assertEqual(len(seen),3);self.assertTrue(all(a==1 for _,a in seen))
         store.finish_job.assert_called_once();args=store.finish_job.call_args.args
-        self.assertEqual(args[2],'failed');self.assertTrue(args[3].startswith('云端后台无法连接模型服务：连接或上传请求超时'));self.assertIn('批次未开始，已保存自检结果',args[3])
+        self.assertEqual(args[2],'failed');self.assertTrue(args[3].startswith('云端后台无法连接模型服务：连接或上传请求超时'));self.assertIn('已自检 3 次均未连通，批次未开始，已保存自检结果',args[3])
+        self.assertEqual(sum(1 for c in store.progress.call_args_list if '秒后重试' in c.args[2]),2)
         self.assertTrue(any(e.startswith('云端自检：小请求 失败（连接或上传请求超时') for e in events));store.save_contacts.assert_not_called();store.save_result.assert_not_called()
     def test_large_probe_failure_reports_mtu(self):
-        store=self.store();seen,sites,events=self.run_job(store,['OK',self.request_timeout()])
+        store=self.store();seen,sites,events=self.run_job(store,['OK',self.request_timeout()]*3)
         self.assertEqual(sites,[]);self.assertGreaterEqual(seen[1][0],55_000);self.assertLessEqual(seen[1][0],70_000)
-        args=store.finish_job.call_args.args;self.assertEqual(args[2],'failed');self.assertIn('云端后台无法上传较大的请求（疑似网络 MTU 问题）',args[3])
+        args=store.finish_job.call_args.args;self.assertEqual(args[2],'failed');self.assertIn('云端后台无法上传较大的请求（疑似网络 MTU 问题）',args[3]);self.assertIn('已自检 3 次均未连通，批次未开始',args[3])
         self.assertTrue(any(e.startswith('云端自检：小请求 成功') for e in events));self.assertTrue(any(e.startswith('云端自检：60KB 请求 失败') for e in events))
     def test_config_error_fails_with_its_message(self):
         from model_service import ModelConfigError
@@ -60,7 +61,7 @@ class CloudSelfCheckTests(unittest.TestCase):
         store=self.store();seen,_,events=self.run_job(store,[],mode='demo')
         self.assertEqual(seen,[]);self.assertFalse(any('云端自检' in e for e in events));store.finish_job.assert_called_with('job','lease','completed')
     def test_proxy_value_and_key_never_logged(self):
-        store=self.store();_,_,events=self.run_job(store,[self.request_timeout()])
+        store=self.store();_,_,events=self.run_job(store,[self.request_timeout()]*3)
         joined=' '.join(events)+' '+' '.join(map(str,store.finish_job.call_args.args))
         self.assertIn('已设置 HTTPS_PROXY',joined);self.assertNotIn('proxy-password',joined);self.assertNotIn('10.0.0.1',joined);self.assertNotIn(KEY,joined)
     def test_large_probe_http_or_reply_failure_is_not_mtu_and_batch_continues(self):
@@ -90,6 +91,46 @@ class CloudSelfCheckTests(unittest.TestCase):
         with patch.object(cloud_worker.ModelService,'complete',complete),patch.object(cloud_worker.socket,'getaddrinfo',return_value=[]):
             with self.assertRaises(CollectionCancelled):cloud_worker.self_check(store,{'state':{}},'lease',lambda m:None,stop)
         self.assertEqual(len(calls),1)
+    def test_network_failure_then_success_on_retry_proceeds(self):
+        store=self.store();seen,sites,events=self.run_job(store,[self.request_timeout(),'OK','OK'])
+        self.assertEqual(len(seen),3);self.assertEqual(len(sites),2);store.finish_job.assert_called_with('job','lease','completed')
+        self.assertTrue(any('第 1 次未连通，0 秒后重试（共 3 次）' in e for e in events));self.assertFalse(any('第 2 次未连通' in e for e in events))
+    def test_large_probe_network_failure_is_retried_too(self):
+        store=self.store();seen,sites,_=self.run_job(store,['OK',self.request_timeout(),'OK','OK'])
+        self.assertEqual(len(seen),4);self.assertEqual(len(sites),2);store.finish_job.assert_called_with('job','lease','completed')
+    def test_config_error_is_not_retried(self):
+        from model_service import ModelConfigError
+        store=self.store();seen,sites,events=self.run_job(store,[ModelConfigError('模型服务调用失败：HTTP 401：bad。请核对 API Key')])
+        self.assertEqual(len(seen),1);self.assertEqual(sites,[]);self.assertFalse(any('秒后重试' in e for e in events))
+    def test_stop_during_retry_wait_cancels_without_more_probes(self):
+        import cloud_worker
+        from server import CollectionCancelled
+        store=self.store();stop=threading.Event();calls=[]
+        def complete(service,messages,config=None,attempts=3):calls.append(1);raise self.request_timeout()
+        def log(message):
+            if '秒后重试' in message:stop.set()
+        with patch.object(cloud_worker.ModelService,'complete',complete),patch.object(cloud_worker.socket,'getaddrinfo',return_value=[]),patch.object(cloud_worker,'SELF_CHECK_DELAYS',[30,30]):
+            with self.assertRaises(CollectionCancelled):cloud_worker.self_check(store,{'state':{}},'lease',log,stop)
+        self.assertEqual(len(calls),1)
+    def test_user_stop_during_retry_wait_ends_job_stopped(self):
+        import cloud_worker
+        store=self.store();store.heartbeat.return_value=True
+        with patch.object(cloud_worker,'HEARTBEAT_INTERVAL',.01):
+            seen,sites,_=self.run_job(store,[self.request_timeout()],delays=[5,5])
+        self.assertEqual(len(seen),1);self.assertEqual(sites,[]);store.finish_job.assert_called_with('job','lease','stopped')
+    def test_shutdown_during_retry_wait_requeues_job(self):
+        store=self.store();db=MagicMock()
+        @contextlib.contextmanager
+        def fenced(*args):yield db,{'cancel_requested':False}
+        store.fenced=fenced;shutdown=threading.Event()
+        def log_side(*args,**kwargs):
+            if any('秒后重试' in str(a) for a in args):shutdown.set()
+        store.progress.side_effect=log_side
+        import cloud_worker
+        with patch.object(cloud_worker,'HEARTBEAT_INTERVAL',.01):
+            seen,sites,_=self.run_job(store,[self.request_timeout()],delays=[5,5],shutdown=shutdown)
+        self.assertEqual(len(seen),1);self.assertEqual(sites,[]);store.finish_job.assert_not_called()
+        self.assertTrue(any("status=?,lease_owner=NULL" in str(c.args[0]) and c.args[1][0]=='queued' for c in db.execute.call_args_list))
     def test_cancel_before_probes_skips_them(self):
         import cloud_worker
         store=self.store()
