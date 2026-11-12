@@ -43,7 +43,18 @@
   }
   return {bins,unknown,comparable};
  }
- const core={identity,emailEligible,inFollowup,resource,models,matching,discount,distribution};
+ function collectionReason(row){
+  const result=row.contact_result||{},diagnostics=result.diagnostics||[];
+  if(diagnostics.length)return [...new Set(diagnostics.map(d=>d.label).filter(Boolean))].slice(0,3).join('；');
+  const warnings=(result.warnings||[]).join('；');
+  if(/域名无法解析|ERR_NAME_NOT_RESOLVED/i.test(warnings))return '域名解析失败';
+  if(/ERR_CERT_|SSL:|证书/i.test(warnings))return '网站证书异常';
+  if(/ERR_TIMED_OUT|timed out|Timeout/i.test(warnings))return '网站访问超时';
+  if(/robots.txt 不允许/i.test(warnings))return '页面访问规则限制';
+  if(/只读采集/i.test(warnings))return '页面操作被只读保护拦截';
+  return result.contact_summary||'';
+ }
+ const core={collectionReason,identity,emailEligible,inFollowup,resource,models,matching,discount,distribution};
  if(typeof module!=='undefined'&&module.exports)module.exports=core;
  if(typeof document==='undefined')return;
  window.ScoutWorkspace=core;
@@ -76,7 +87,7 @@
   const tasks=[['all','待处理'],['todo_manual','待联系'],['todo_email','可邮件联系'],['todo_price','报价待复核'],['todo_contact','线索待补查']];
   const all=initial.filter(r=>(filter==='all'||matchesTask(r,filter))&&(!search||`${r.id} ${r.name} ${r.url} ${JSON.stringify(r.contacts)}`.toLowerCase().includes(search.toLowerCase())));
   const footer=pager(all.length),shown=all.slice((pageNo-1)*15,pageNo*15);
-  return heading('联系与复核','先核实线索、完成首次联系；保存联系记录后进入后续处理。',importButton()+runButton(),'CONTACT & REVIEW')+notice()+shortProgress()+panel('联系线索与待办',`<div class="ws-tabs">${tasks.map(([key,label])=>`<button data-filter="${key}" class="filter ${filter===key?'active':''}">${label} <b>${initial.filter(r=>key==='all'||matchesTask(r,key)).length}</b></button>`).join('')}</div><div class="table-tools"><label class="search">${I('search')}<input id="ws-contact-search" value="${esc(search)}" placeholder="搜索编号、网址或联系方式" aria-label="搜索联系待办"></label><button class="text-btn" data-nav="followup">查看已联系网站 ${I('arrow')}</button></div><div class="table-scroll"><table class="ws-contact-table"><thead><tr><th>编号 / 网站</th><th>联系渠道 / 用途</th><th>待处理事项</th><th>操作</th></tr></thead><tbody>${shown.map(r=>`<tr><td>${site(r)}</td><td>${contactColumn(r)}</td><td>${stageBadges(r)}<small class="ws-muted ws-clamp">${esc(r.contact_result?.contact_summary||'')}</small></td><td><div class="ws-actions">${Object.values(r.contacts||{}).some(v=>v.length)?recordButton(r):`<button class="btn small" data-agent-retry="${r.id}">继续查找</button>`}${followupStages(r).some(s=>s.key==='todo_price')||r.status==='review'?reviewButton(r):''}</div></td></tr>`).join('')||'<tr><td colspan="4" class="empty">当前暂无匹配待办；已联系的网站在“后续处理”中。</td></tr>'}</tbody></table></div>${footer}`,`<a class="text-btn" href="/api/export-contacts?mode=${mode}">导出联系方式</a>`);
+  return heading('联系与复核','先核实线索、完成首次联系；保存联系记录后进入后续处理。',importButton()+runButton(),'CONTACT & REVIEW')+notice()+shortProgress()+panel('联系线索与待办',`<div class="ws-tabs">${tasks.map(([key,label])=>`<button data-filter="${key}" class="filter ${filter===key?'active':''}">${label} <b>${initial.filter(r=>key==='all'||matchesTask(r,key)).length}</b></button>`).join('')}</div><div class="table-tools"><label class="search">${I('search')}<input id="ws-contact-search" value="${esc(search)}" placeholder="搜索编号、网址或联系方式" aria-label="搜索联系待办"></label><button class="text-btn" data-nav="followup">查看已联系网站 ${I('arrow')}</button></div><div class="table-scroll"><table class="ws-contact-table"><thead><tr><th>编号 / 网站</th><th>联系渠道 / 用途</th><th>待处理事项</th><th>操作</th></tr></thead><tbody>${shown.map(r=>`<tr><td>${site(r)}</td><td>${contactColumn(r)}</td><td>${stageBadges(r)}<small class="ws-muted ws-clamp">${esc(collectionReason(r))}</small></td><td><div class="ws-actions">${Object.values(r.contacts||{}).some(v=>v.length)?recordButton(r):`<button class="btn small" data-agent-retry="${r.id}">继续查找</button>`}${followupStages(r).some(s=>s.key==='todo_price')||r.status==='review'?reviewButton(r):''}</div></td></tr>`).join('')||'<tr><td colspan="4" class="empty">当前暂无匹配待办；已联系的网站在“后续处理”中。</td></tr>'}</tbody></table></div>${footer}`,`<a class="text-btn" href="/api/export-contacts?mode=${mode}">导出联系方式</a>`);
  }
  function followupPage(){
   const allRows=rows().filter(r=>inFollowup(r,follow()));

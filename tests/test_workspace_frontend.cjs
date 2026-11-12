@@ -50,3 +50,10 @@ test('unknown resource or missing billing units remain unverified even with a pu
  assert.equal(W.discount(offer(.4,{resource_form:'待确认'}),{}),null);
  assert.equal(W.discount(offer(.4,{unit:null}),{}),null);
 });
+test('contact collection reasons distinguish old errors and preserve found channels',()=>{
+ const old={url:'https://a.example',contact_status:'blocked',contact_result:{warnings:['域名无法解析']}};
+ assert.match(W.collectionReason(old),/域名/);
+ const fresh={...old,contact_result:{diagnostics:[{code:'http',label:'网站返回 HTTP 404',url:'https://a.example/docs',detail:'404'}]}};
+ assert.match(W.collectionReason(fresh),/HTTP 404/);
+ assert.match(W.collectionReason({...old,contact_status:'found',contact_result:{contact_summary:'找到作者渠道'}}),/找到作者渠道/);
+});

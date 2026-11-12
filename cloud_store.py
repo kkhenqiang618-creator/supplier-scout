@@ -194,7 +194,7 @@ class PostgresStore(Store):
                     jsonb_array_length(offers::jsonb) AS offer_count,
                     jsonb_path_query_array(offers::jsonb,'$[*].model') AS offer_models,
                     COALESCE((SELECT bool_or(item->>'status'='review' OR COALESCE(item->>'ratio','')='') FROM jsonb_array_elements(offers::jsonb) item),false) AS needs_price_review,
-                    jsonb_build_object('contact_records',COALESCE(contact_result::jsonb->'contact_records','[]'::jsonb),'contact_summary',contact_result::jsonb->'contact_summary','scope',contact_result::jsonb->'scope')::text AS contact_result
+                    jsonb_build_object('contact_records',COALESCE(contact_result::jsonb->'contact_records','[]'::jsonb),'contact_summary',contact_result::jsonb->'contact_summary','scope',contact_result::jsonb->'scope','warnings',COALESCE(contact_result::jsonb->'warnings','[]'::jsonb),'diagnostics',COALESCE(contact_result::jsonb->'diagnostics','[]'::jsonb))::text AS contact_result
                     FROM suppliers ORDER BY id"""
                 suppliers=[self.decode_row(row) for row in db.execute(projection)]
                 for row in suppliers:row['_summary']=True

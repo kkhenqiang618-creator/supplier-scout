@@ -21,6 +21,7 @@ import urllib.robotparser
 from pathlib import Path
 from model_service import ModelService,ModelConfigError,ModelTransientError
 from engine import validate_url,is_public_ip
+from collection_diagnostics import collection_diagnostics
 
 ROOT=Path(__file__).resolve().parent
 CONTACT_TYPES={'email','phone','wechat','qq','qq_group','wechat_link','official_account','telegram','discord','contact_form','online_service','qrcode','other'}
@@ -352,7 +353,7 @@ SYSTEM='''你是供应商信息采集浏览器Agent。根据每一轮真实页�
 你可以选择 open（只能使用已观察到的http链接）、click（快照中控件ref）、search（站内搜索框ref和text）、scroll（up/down）、wait、decode_qr（图片ref）、finish。
 每次只执行一个动作。遇到Loading可wait；页面变化后使用新ref。只读观察可以打开公告、详情、联系方式弹窗。不要点击交易或消息发送按钮。
 每轮输出JSON：{"reason":"选择下一步的简短中文依据","action":{"type":"click","ref":"c1"},"contacts":[{"type":"email/phone/wechat/qq/qq_group/wechat_link/official_account/telegram/discord/contact_form/online_service/qrcode/other","value":"真实原值或真实联系链接","purpose":"商务/客服/技术支持/待确认等","source_url":"实际来源页面","evidence":"逐字证据","risk_flags":[]}],"offers":[],"missing_information":[]}。
-contacts是本轮新发现，不重复输出已知项。缺失项写null或[]，不编造。只有本轮可核实的来源才提取；第三方平台和归属不明须标风险。
+页面加载已由程序自动等待；不要对相同页面重复点击已失败的入口，结合history的error/outcome和warnings改查其他已观察入口。公开登录/注册页面可只读查看，不提交登录、注册、重置或发送表单。\ncontacts是本轮新发现，不重复输出已知项。缺失项写null或[]，不编造。只有本轮可核实的来源才提取；第三方平台和归属不明须标风险。
 全量模式才收集目标模型报价，model必须是传入规则model的一个值，保留model_name、input_price/output_price/cache_price、currency、unit、group、group_multiplier、resource_form、source、evidence、notes；price_text保留范围价和条件。不把分组倍率、充值折扣冒充官方目录折扣，ratio不能确认时为null。仅联系方式模式不要查看、提取或判断报价。
 上下文steps_remaining是本轮剩余观察次数（含本次）；次数少时优先页尾、联系/关于页、公告/铃铛、客服入口和二维码，再看文档或子站；steps_remaining为1时本次结果之后不再观察新页面，应提取已见渠道并finish；仅当上下文may_extend为true、尚未找到任何联系方式且仍有未检查的联系入口时，可照常给出下一步动作（程序可能追加少量观察次数并重新告知steps_remaining）。
 当合理检查完或已找到足够可用渠道时finish；不要无止境翻页。若任务预算用尽，保留已有事实，说明未完成。'''
@@ -378,7 +379,7 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
         try:service.test()
         except ModelTransientError as error:raise ModelTransientSiteError(MODEL_TRANSIENT_SUMMARY+'：'+str(error),{'contacts':{},'contact_records':[],'contact_status':'incomplete','contact_summary':MODEL_TRANSIENT_SUMMARY,'sources':[],'steps':[],'warnings':[str(error)],'offers':[],'scope':scope,'model_transient':True})
         except ValueError as error:raise AgentServiceError(str(error))
-    policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False;weak=[];fallback={'weak':False,'dead':False,'escalated':False};unreadable={};extended=False;robots_refused=False
+    policy={};observations=[];records=[];offers=[];steps=[];warnings=[];blocked=False;finished=False;weak=[];fallback={'weak':False,'dead':False,'escalated':False};unreadable={};extended=False;robots_refused=False;action_attempts={};repeat_refusals=0;loading_waits={}
     label=getattr(browser_factory,'label','Moli');method=label+' 浏览器 Agent'
     def current_deadline():
         if weak_deadline is not None and fallback['weak'] and not records:return weak_deadline
@@ -395,7 +396,10 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
         contacts={}
         for item in records:contacts.setdefault(item['type'],[]).append(item['value'])
         # render_weak: Moli rendered too little; never let it read as "no contacts". blocked/incomplete keep the site in '继续未完成' (future Chrome fallback hook).
-        return {'contacts':contacts,'contact_records':records,'contact_status':choose_contact_status(records,blocked or site_weak,len(steps)),'contact_summary':('已找到 '+str(len(records))+' 条联系线索，按用途确认后跟进' if records else RENDER_WEAK_SUMMARY if site_weak else '访问受阻，不能判定网站没有联系方式' if blocked else '本次检查范围尚未发现可核实联系方式，需继续查找'),**({'render_weak':True} if site_weak else {}),'sources':[{'url':s['url'],'method':method,'excerpt':observed_text(s)[:35000],'text_length':len(observed_text(s))} for s in observations],'steps':steps,'warnings':list(dict.fromkeys(warnings)),'offers':offers if scope=='all' else [],'scope':scope,'_fallback':dict(fallback)}
+        payload={'contacts':contacts,'contact_records':records,'contact_status':choose_contact_status(records,blocked or site_weak,len(steps)),'contact_summary':('已找到 '+str(len(records))+' 条联系线索，按用途确认后跟进' if records else RENDER_WEAK_SUMMARY if site_weak else '访问受阻，不能判定网站没有联系方式' if blocked else '本次检查范围尚未发现可核实联系方式，需继续查找'),**({'render_weak':True} if site_weak else {}),'sources':[{'url':s['url'],'method':method,'excerpt':observed_text(s)[:35000],'text_length':len(observed_text(s))} for s in observations],'steps':steps,'warnings':list(dict.fromkeys(warnings)),'offers':offers if scope=='all' else [],'scope':scope,'_fallback':dict(fallback)}
+        payload['diagnostics']=collection_diagnostics(payload,observations,url)
+        for issue in payload['diagnostics']:issue['browser']=issue.get('browser') or label
+        return payload
     def allow(target):
         validate_url(target);p=urllib.parse.urlsplit(target);origin=p.scheme+'://'+p.netloc
         if origin not in policy:
@@ -414,7 +418,14 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
         browser=None
         try:
             allow(url);log('启动 '+label+' 浏览器；'+('仅采集联系方式' if scope=='contacts' else '全量采集'))
-            browser=browser_factory(folder);snapshot=browser.command({'type':'open','url':url})['snapshot']
+            browser=browser_factory(folder)
+            for attempt in range(2):
+                try:snapshot=browser.command({'type':'open','url':url})['snapshot'];break
+                except (BrowserDeadError,BrowserRuntimeError):raise
+                except ValueError as error:
+                    transient=re.search(r'ERR_TIMED_OUT|ERR_CONNECTION_(?:RESET|CLOSED)|ERR_FAILED',str(error))
+                    if attempt or not transient or current_deadline() is not None and current_deadline()-clock()<reserve+COMMAND_TIMEOUT:raise
+                    warnings.append('首次访问暂时失败，自动重试一次：'+str(error)[:250]);log('首次访问暂时失败，自动重试（不消耗 Agent 步数）')
             if escalate_weak and snapshot.get('render_weak') and not CONTACT_HINT.search(observed_text(snapshot)):
                 log(label+' 首页渲染不完整，先等待页面加载（不调用模型）')
                 snapshot=browser.command({'type':'wait'})['snapshot']
@@ -426,7 +437,28 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                     if index!=max_steps or not can_extend():break
                     extended=True;cap=max_steps+extra;notice=label+' 前 '+str(max_steps)+' 步未找到联系方式，继续查找最多 '+str(extra)+' 步（共 '+str(cap)+' 步）'
                     log(notice);warnings.append(notice)
+                # Loading belongs to the current observation, not another paid model step.
+                if snapshot.get('loading_pending') or snapshot.get('challenge'):
+                    load_key=(snapshot['url'],observed_text(snapshot));wait_count=loading_waits.get(load_key,0)
+                    for waiting in range(wait_count,2):
+                        if current_deadline() is not None and current_deadline()-clock()<reserve+COMMAND_TIMEOUT:break
+                        log(label+' 正在等待页面加载（不消耗 Agent 步数）')
+                        snapshot=browser.command({'type':'wait'})['snapshot']
+                        loading_waits[load_key]=waiting+1
+                        loading_waits[(snapshot['url'],observed_text(snapshot))]=waiting+1
+                        if not snapshot.get('loading_pending') and not snapshot.get('challenge'):break
+                    if snapshot.get('loading_pending') or snapshot.get('challenge'):
+                        snapshot=dict(snapshot,loading_wait_exhausted=True)
+                        message='网站验证页面持续等待，尚未进入业务页面' if snapshot.get('challenge') else '页面加载等待已达上限，可稍后继续检查'
+                        if message not in warnings:warnings.append(message)
+                        # A stuck auxiliary spinner must not hide working navigation or already visible channels.
+                        if snapshot.get('challenge') or not snapshot.get('controls') and not CONTACT_HINT.search(observed_text(snapshot)):
+                            observations.append(snapshot);blocked=True;finished=True;break
                 observations.append(snapshot)
+                if isinstance(snapshot.get('http_status'),int) and snapshot['http_status']>=400:
+                    warnings.append('网站返回 HTTP '+str(snapshot['http_status'])+'：'+snapshot['url'])
+                    if not snapshot.get('controls') and not CONTACT_HINT.search(observed_text(snapshot)):
+                        blocked=True;finished=True;break
                 if escalate_weak and index==0 and snapshot.get('render_weak') and not CONTACT_HINT.search(observed_text(snapshot)):
                     weak.append(snapshot.get('url'));fallback.update(weak=True,escalated=True)
                     warnings.append(RENDER_WEAK_WARNING+('（页面脚本无响应）' if snapshot.get('page_unresponsive') else '（页面加载超时）' if snapshot.get('goto_timeout') else ''))
@@ -480,6 +512,19 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                 log(reason+'；已找到 '+str(len(records))+' 条联系线索')
                 if kind=='finish':finished=True;break
                 try:
+                    # refs change on snapshots: compare semantic controls and the actual observed page instead.
+                    control=next((c for c in snapshot.get('controls',[]) if c['ref']==action.get('ref')),{})
+                    target=json.dumps([control.get(key) for key in ['ref','href','aria','title','label','context']],ensure_ascii=False) if kind in ['click','search'] else action.get('url') or action.get('direction') or ''
+                    fingerprint=observed_text(snapshot)
+                    if kind=='scroll':fingerprint+=str((snapshot.get('scroll_y'),snapshot.get('scroll_height')))
+                    identity=(snapshot['url'],kind,str(target),str(action.get('text') or ''),fingerprint)
+                    if kind in ['open','click','search','scroll'] or kind=='wait' and snapshot.get('loading_wait_exhausted'):
+                        action_attempts[identity]=action_attempts.get(identity,0)+1
+                        if action_attempts[identity]>2:
+                            repeat_refusals+=1;message='已跳过重复操作：页面连续无变化，请选择其他入口'
+                            step.update(outcome='skipped',error=message);warnings.append(message);log(message)
+                            if repeat_refusals>=2:finished=True;break
+                            continue
                     if kind=='open':
                         target=str(action.get('url',''));known={url}
                         for s in observations:
@@ -487,10 +532,14 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                             known.update(urllib.parse.urljoin(s['url'],c['href']) for c in s.get('controls',[]) if c.get('href'))
                         if target not in known and target.endswith('…'):  # Prompt shortened a long href; accept a unique prefix match.
                             matches=[k for k in known if k.startswith(target[:-1])];target=matches[0] if len(matches)==1 else target;action=dict(action,url=target)
-                        if target not in known:raise ValueError('该网址未在已观察的页面链接中出现')
+                        if target not in known:
+                            normalize=lambda value:urllib.parse.urlunsplit(urllib.parse.urlsplit(value)._replace(path=urllib.parse.urlsplit(value).path or '/'))
+                            matches=[k for k in known if normalize(k)==normalize(target)]
+                            if matches:target=matches[0];action=dict(action,url=target)
+                            else:raise ValueError('该网址未在已观察的页面链接中出现')
                         allow(target)
                     elif kind=='click':
-                        control=next((c for c in snapshot.get('controls',[]) if c['ref']==action.get('ref')),None)
+                        control=next((c for c in snapshot.get('controls',[]) if c['ref']==action.get('ref')),{})
                         if not control:raise ValueError('控件编号已过期')
                         if control.get('href') and not control['href'].startswith('#'):allow(urllib.parse.urljoin(snapshot['url'],control['href']))
                     elif kind=='decode_qr':
@@ -507,11 +556,12 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=No
                     elif kind not in ['search','scroll','wait']:raise ValueError('模型选择了不支持的动作')
                     # Never pass model-chosen script, path or extra fields to the browser.
                     clean={key:action[key] for key in ['type','url','ref','text','direction'] if key in action}
-                    snapshot=browser.command(clean)['snapshot']
+                    snapshot=browser.command(clean)['snapshot'];step['outcome']='observed'
                 except BrowserDeadError:raise
                 except Exception as error:
                     if 'robots.txt' in str(error):robots_refused=True
-                    warnings.append(str(error)[:400]);blocked=True;log('本步受阻：'+str(error)[:200])
+                    failure_url=action.get('url') or (urllib.parse.urljoin(snapshot['url'],control['href']) if control.get('href') else snapshot['url'])
+                    step.update(outcome='blocked',error=str(error)[:400],failure_url=failure_url);warnings.append(str(error)[:400]);blocked=True;log('本步受阻：'+str(error)[:200])
             if not finished:warnings.append('达到本次单站动作预算，检查尚未完成，可单独继续')
         except AgentServiceError as error:
             warnings.append(str(error));blocked=True
@@ -588,7 +638,7 @@ def merge_results(moli,chrome):
     else:status='blocked';summary=BOTH_WEAK_SUMMARY if both_weak else '访问受阻，不能判定网站没有联系方式'
     return {'contacts':contacts,'contact_records':records,'contact_status':status,'contact_summary':summary,**({'render_weak':True} if both_weak else {}),
         'sources':list(moli.get('sources',[]))+list(chrome.get('sources',[])),'steps':steps,'warnings':list(dict.fromkeys([CHROME_RETRIED if chrome_ok and w.startswith(RENDER_WEAK_WARNING) else w for w in moli.get('warnings',[])]+list(chrome.get('warnings',[])))),
-        'offers':offers,'scope':moli.get('scope') or chrome.get('scope')}
+        'offers':offers,'scope':moli.get('scope') or chrome.get('scope'),'diagnostics':list(moli.get('diagnostics',[]))+list(chrome.get('diagnostics',[]))}
 def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browser,chrome_factory=ChromeBrowser,clock=time.monotonic,chrome_ready=chrome_available):
     """Moli first; at most one Chrome retry (started only after Moli's browser is closed by run_agent's finally).
     Moli keeps the whole budget unless a page turns weak with nothing found; then it stops at the scope's Moli budget to leave Chrome its time.

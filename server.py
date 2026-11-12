@@ -1,3 +1,4 @@
+from collection_diagnostics import collection_diagnostics
 #!/usr/bin/env python3
 """Supplier Scout local workspace. No runtime dependencies. No outbound messaging."""
 import argparse
@@ -128,6 +129,9 @@ class Store:
     def decode_row(row):
         item=dict(row)
         for key in ['contacts','offers','sources','warnings','contact_result']: item[key]=json.loads(item[key])
+        result=item.get('contact_result') or {}
+        if not result.get('diagnostics'):result['diagnostics']=collection_diagnostics(result,fallback_url=item.get('url',''))
+        item['contact_result']=result
         return item
     def workspace_key(self,kind):
         # settings has a global primary key even with tenant RLS enabled.
@@ -242,8 +246,9 @@ class Store:
                     sources.append(entry);known.add((entry.get('url'),entry.get('excerpt')))
             current=result.get('contact_status','incomplete')
             if not result.get('contacts') and any(row['contacts'].values()):current='needs_review'
-            detail={key:result.get(key) for key in ['contact_records','contact_summary','steps','warnings','scope']}
+            detail={key:result.get(key) for key in ['contact_records','contact_summary','steps','warnings','scope','diagnostics']}
             for key in ['contact_records','steps','warnings']:detail[key]=detail[key] or []
+            detail['diagnostics']=result.get('diagnostics') or collection_diagnostics(result,fallback_url=row['url'])
             for record in detail['contact_records']:record.setdefault('checked_at',now())
             previous=(row['contact_result'].get('previous_contact_records') or [])+(row['contact_result'].get('contact_records') or [])
             detail['previous_contact_records']=list({(r.get('type'),r.get('value'),r.get('source_url'),r.get('evidence')):r for r in previous}.values())

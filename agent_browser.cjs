@@ -32,7 +32,9 @@ async function start(mode,target){
  let page=context.pages()[0];
  if(!page||page.isClosed()||!await bounded(page.evaluate(()=>1),3000,'页面无响应').then(()=>true,()=>false))page=await context.newPage();
  page.setDefaultTimeout(10000);
- const lastSnapshot=new WeakMap();
+ const lastSnapshot=new WeakMap(),responses=new WeakMap();
+ const track=target=>target.on('response',response=>{try{if(response.request().isNavigationRequest()&&response.frame()===target.mainFrame())responses.set(target,{url:response.url(),status:response.status()})}catch(e){}});
+ context.pages().forEach(track);context.on('page',track);
  async function snapshot(deadline){
   // A trivial probe first: a page stuck in a script loop answers nothing, so return quickly instead of waiting for Moli's 10s watchdog.
   try{await bounded(page.evaluate(()=>1),Math.min(PROBE_LIMIT,deadline-Date.now()),'页面脚本无响应');
@@ -59,13 +61,16 @@ async function start(mode,target){
    const broad=Array.from(document.querySelectorAll('[role="tabpanel"],[class*="popup"],[class*="announcement"]')).slice(0,200).filter(e=>candidate(e)&&!specific.includes(e)&&!specific.some(s=>e.contains(s))&&!(pageHeight>innerHeight+200&&e.scrollHeight>=pageHeight*.9));
    const dialogNodes=specific.concat(broad);
    const dialogs=dialogNodes.filter(e=>!dialogNodes.some(other=>other!==e&&other.contains(e))).map(e=>textOf(e).slice(0,9000)).filter(Boolean).slice(0,8);
-   return {url:location.href,title:document.title,text:full.slice(0,18000),tail:full.length>18000?full.slice(-10000):'',footer:textOf(document.querySelector('footer')).slice(0,10000),dialogs,contact_hints:full.split('\n').filter(s=>/@|微信|QQ|联系|客服|商务|Telegram|Discord|[Cc]ontact|[Ss]ales|[Ss]upport/.test(s)).slice(0,60).join('\n').slice(0,8000),controls,images};
+   const loading=Array.from(document.querySelectorAll('body *')).slice(0,4000).some(e=>!e.children.length&&visible(e)&&/^(?:loading[. …]*|正在加载[. …]*|加载中[. …]*|请稍候[. …]*)$/i.test((e.textContent||'').trim()))||document.readyState==='loading'||Array.from(document.querySelectorAll('[aria-busy="true"],[role="progressbar"],.loading,.spinner')).some(visible)||/(?:^|\n)\s*(?:loading[. …]*|正在加载[. …]*|加载中[. …]*|请稍候[. …]*)\s*(?:$|\n)/i.test(full);
+   const challenge=/cloudflare/i.test(full)&&/checking your browser|verify you are human|verifying|安全验证|等待源站|just a moment/i.test(full);
+   return {scroll_y:Math.round(window.scrollY||0),scroll_height:document.documentElement.scrollHeight,loading_pending:loading,challenge,ready_state:document.readyState,url:location.href,title:document.title,text:full.slice(0,18000),tail:full.length>18000?full.slice(-10000):'',footer:textOf(document.querySelector('footer')).slice(0,10000),dialogs,contact_hints:full.split('\n').filter(s=>/@|微信|QQ|联系|客服|商务|Telegram|Discord|[Cc]ontact|[Ss]ales|[Ss]upport/.test(s)).slice(0,60).join('\n').slice(0,8000),controls,images};
   }),Math.min(EVAL_LIMIT,deadline-Date.now()),'页面快照超时');
    lastSnapshot.set(page,current);return current;
   }catch(error){
-   if(!error.bounded)throw error;
+   if(!error.bounded&&!/execution context was destroyed|cannot find context/i.test(error.message))throw error;
    // Hung or very slow page: keep the run going with the previous observation of this URL, flagged so run_agent can warn.
    const previous=lastSnapshot.get(page);const url=page.url();
+   if(!error.bounded)return Object.assign(previous&&previous.url===url?{...previous}:{url,title:'',text:'',tail:'',footer:'',dialogs:[],contact_hints:'',controls:[],images:[]},{loading_pending:true,navigation_pending:true});
    return Object.assign(previous&&previous.url===url?{...previous}:{url,title:'',text:'',tail:'',footer:'',dialogs:[],contact_hints:'',controls:[],images:[]},{page_unresponsive:true,render_weak:true,unresponsive_reason:error.message});
   }
  }
@@ -76,13 +81,13 @@ async function start(mode,target){
   try{
    const cmd=JSON.parse(line);let gotoTimedOut=false;
    if(cmd.type==='open'){
-    try{await bounded(page.goto(cmd.url,{waitUntil:'domcontentloaded',timeout:GOTO_LIMIT}),GOTO_LIMIT+1000,'页面加载超时')}
+    try{const response=await bounded(page.goto(cmd.url,{waitUntil:'domcontentloaded',timeout:GOTO_LIMIT}),GOTO_LIMIT+1000,'页面加载超时');if(response)responses.set(page,{url:response.url(),status:response.status()})}
     catch(error){if(error.bounded||error.name==='TimeoutError')gotoTimedOut=true;else throw error}
    }else if(cmd.type==='click'){
     if(!/^c\d+$/.test(cmd.ref))throw Error('控件编号无效');
     const el=element('data-scout-ref',cmd.ref);
-    const info=await bounded(el.evaluate(e=>({tag:e.tagName,type:e.type,label:(e.textContent||'')+' '+(e.getAttribute('aria-label')||''),href:e.getAttribute('href')})),left(),'页面脚本无响应，无法读取控件');
-    if(info.type==='submit'||/确认支付|立即支付|确认充值|提交订单|发送消息|发送邮件|删除|注销|退出登录|登录|注册|sign in|log in|sign up/i.test(info.label))throw Error('该操作超出只读采集范围');
+    const info=await bounded(el.evaluate(e=>({tag:e.tagName,type:e.type,label:(e.textContent||'')+' '+(e.getAttribute('aria-label')||''),href:e.getAttribute('href'),form:!!e.form})),left(),'页面脚本无响应，无法读取控件');
+    if(info.form&&info.type==='submit'||/确认支付|立即支付|确认充值|提交订单|发送消息|发送邮件|删除|注销|退出登录|sign out|log out|delete|checkout|send message/i.test(info.label)||!info.href&&/登录|注册|sign in|log in|sign up/i.test(info.label))throw Error('该操作超出只读采集范围');
     if(info.href&&!['http:','https:'].includes(new URL(info.href,page.url()).protocol))throw Error('只记录该联系链接，不启动外部应用');
     const before=context.pages();
     await bounded(el.evaluate(e=>e.click()),left(),'页面脚本无响应，点击未完成');
@@ -119,8 +124,20 @@ async function start(mode,target){
    }else if(!['snapshot','wait'].includes(cmd.type))throw Error('不支持的浏览器动作');
    await sleep(cmd.type==='wait'?1800:650);
    let current=await snapshot(deadline);
-   // Slow single-page apps: poll while the text is still short and changing, within the command budget.
-   for(let previous=-1,started=Date.now(),stop=started+POLL_LIMIT;!current.page_unresponsive&&current.text.length<WEAK_TEXT&&!(current.text.length>0&&current.text.length===previous&&Date.now()-started>=1800)&&Date.now()<stop&&deadline-Date.now()>EVAL_LIMIT/3+1200;){previous=current.text.length;await sleep(1200);current=await snapshot(deadline)}
+   // Settle within this command, even for long pages. Network-idle is deliberately not required.
+   // Leave room for one bounded DOM read; an infinite spinner cannot stall the worker.
+   const fingerprint=s=>JSON.stringify([s.url,s.text,s.tail,s.dialogs,s.controls?.map(c=>[c.label,c.href,c.aria]),s.images?.map(i=>i.src)]);
+   let signature=fingerprint(current),stableAt=Date.now();
+   const settleEnd=Math.min(Date.now()+POLL_LIMIT,deadline-EVAL_LIMIT-500);
+   while(!current.page_unresponsive&&Date.now()<settleEnd){
+    if(!current.loading_pending&&current.text.trim().length>0&&Date.now()-stableAt>=(current.text.length<WEAK_TEXT?1800:1200))break;
+    await sleep(Math.min(600,Math.max(0,settleEnd-Date.now())));
+    const next=await snapshot(deadline),nextSignature=fingerprint(next);
+    if(nextSignature!==signature){signature=nextSignature;stableAt=Date.now()}
+    current=next;
+   }
+   const response=responses.get(page);
+   if(response&&response.url.split('#')[0]===current.url.split('#')[0])current.http_status=response.status;
    if(gotoTimedOut||current.text.length<WEAK_TEXT)current=Object.assign(current,{render_weak:true},gotoTimedOut?{goto_timeout:true}:{});
    console.log(JSON.stringify({ok:true,snapshot:current}));
   }catch(e){console.log(JSON.stringify({ok:false,error:String(e.message).slice(0,600)}))}
