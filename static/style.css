@@ -6,3 +6,8 @@
 @media(max-width:680px){.dashboard-grid .side-stack{grid-template-columns:1fr}}
 .inline-contact-value small.contact-risk{color:#b29057;font-size:9px}
 .quote-warning{margin-top:12px}.quote-warning>summary{cursor:pointer;font-size:10px;color:#a38f65}
+
+/* Contact QR codes stay scannable: the decoded WeCom/QQ links only open inside the mobile apps. */
+button.linklike{border:0;background:none;padding:0;color:var(--purple);cursor:pointer;font:inherit;text-align:left}
+.qr-box{margin:6px 0 4px;padding:10px;border:1px solid var(--line);border-radius:10px;background:#fbfbfd}
+.qr-image{display:block;width:160px;height:160px;object-fit:contain;image-rendering:pixelated;background:#fff;padding:6px;border:1px solid var(--line);border-radius:8px}

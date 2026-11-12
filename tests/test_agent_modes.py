@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from server import Store
 from browser_agent import validate_contacts, choose_contact_status
 
@@ -16,6 +17,27 @@ class AgentModeTests(unittest.TestCase):
         self.assertEqual(validate_contacts(records,[snapshot])[0],records)
         snapshot['images'][0].update(alt='登录二维码',context='扫码登录')
         self.assertEqual(qr_contact_records(snapshot,'i2',[link]),[])
+    def test_scanned_contact_keeps_qr_image_and_marks_scan_only_links(self):
+        from browser_agent import qr_contact_records
+        link='https://work.weixin.qq.com/ct/wc-example'
+        snapshot={'url':'https://example.com/','images':[{'ref':'i2','src':'https://cdn.example.com/contact.png','alt':'企业微信二维码','context':'扫码添加客服'}]}
+        records=qr_contact_records(snapshot,'i2',[link],'data:image/png;base64,AAAA')
+        self.assertEqual(records[0]['delivery'],'scan')
+        self.assertEqual(records[0]['qr_image'],'data:image/png;base64,AAAA')
+        telegram=qr_contact_records({'url':'https://example.com/','images':[{'ref':'i2','alt':'contact us','context':'telegram'}]},'i2',['https://t.me/example'])[0]
+        self.assertEqual(telegram['delivery'],'link')
+        self.assertNotIn('qr_image',telegram)
+    def test_image_data_url_keeps_small_qr_and_skips_oversized_or_unknown_files(self):
+        from browser_agent import image_data_url
+        with tempfile.TemporaryDirectory() as folder:
+            png=Path(folder)/'a.png';png.write_bytes(b'\x89PNG\r\n\x1a\n'+b'0'*100)
+            self.assertTrue(image_data_url(png).startswith('data:image/png;base64,'))
+            oversized=Path(folder)/'b.png';oversized.write_bytes(b'\x89PNG\r\n\x1a\n'+b'0'*(130*1024))
+            self.assertEqual(image_data_url(oversized),'')
+            self.assertEqual(image_data_url(oversized,limit=64*1024),'')
+            self.assertTrue(image_data_url(Path(folder)/'a.png',limit=64*1024))
+            html=Path(folder)/'c.png';html.write_text('<html>not an image</html>')
+            self.assertEqual(image_data_url(html),'')
     def test_robots_tls_fallback_checks_redirects_and_keeps_cert_verification(self):
         import subprocess,urllib.error
         from pathlib import Path

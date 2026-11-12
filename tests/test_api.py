@@ -31,6 +31,17 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call('/api/drafts',{'id':sid})[0],200)
         draft=self.call('/api/draft?id='+str(sid)); self.assertEqual(draft[0],200); self.assertIn(b'X-Unsent: 1',draft[2])
         csv=self.call('/api/export?mode=real'); self.assertEqual(csv[0],200); self.assertIn('测试供应商',csv[2].decode('utf-8-sig')); self.assertIn('0.35',csv[2].decode('utf-8-sig'))
+    def test_supplier_detail_returns_the_qr_image_hidden_from_the_list(self):
+        self.assertEqual(self.call('/api/import',{'rows':[{'name':'扫码供应商','url':'https://example.com'}]})[0],200)
+        sid=json.loads(self.call('/api/state')[2])['suppliers'][0]['id']
+        image='data:image/png;base64,AAAA'
+        record={'type':'wechat_link','value':'https://work.weixin.qq.com/ct/wc-example','source_url':'https://example.com','evidence':'https://work.weixin.qq.com/ct/wc-example','purpose':'扫码联系','delivery':'scan','qr_image':image}
+        self.app.store.save_contacts(sid,{'contacts':{'wechat_link':[record['value']]},'contact_records':[record],'contact_status':'found'})
+        listed=json.loads(self.call('/api/state')[2])['suppliers'][0]
+        self.assertNotIn('qr_image',listed['contact_result']['contact_records'][0]); self.assertTrue(listed['_summary'])
+        detail=json.loads(self.call('/api/supplier?id='+str(sid))[2])
+        self.assertEqual(detail['contact_result']['contact_records'][0]['qr_image'],image)
+        self.assertEqual(self.call('/api/supplier?id=abc')[0],400)
     def test_excel_upload_and_single_address(self):
         from test_importers import workbook_fixture
         payload={'filename':'名单.xlsx','file_base64':base64.b64encode(workbook_fixture()).decode()}
