@@ -22,13 +22,16 @@ def token():
         except OSError:pass
     return os.environ.get('VERCEL_OIDC_TOKEN','')
 
+# Daemon region; must match vercel.json daemons.browser-worker.instances. Override with SCOUT_DAEMON_REGION (e.g. hkg1) only together with vercel.json.
+DAEMON_REGION=os.environ.get('SCOUT_DAEMON_REGION') or 'sin1'
+
 def enabled():return bool(token())
 
 def set_instances(count):
     if not enabled():return False
     project=os.environ['SCOUT_VERCEL_PROJECT_ID'];team=os.environ['SCOUT_VERCEL_TEAM_ID']
     url='https://api.vercel.com/v1/projects/'+project+'/daemons/browser-worker/instances?teamId='+team
-    request=urllib.request.Request(url,data=json.dumps({'sin1':count}).encode(),method='PUT',headers={'Authorization':'Bearer '+token(),'Content-Type':'application/json'})
+    request=urllib.request.Request(url,data=json.dumps({DAEMON_REGION:count}).encode(),method='PUT',headers={'Authorization':'Bearer '+token(),'Content-Type':'application/json'})
     try:
         with urllib.request.build_opener(NoRedirect()).open(request,timeout=12) as response:result=json.load(response)
         if not result.get('ok'):raise ValueError('云端浏览器启动请求未通过')

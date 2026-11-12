@@ -18,6 +18,19 @@ class ScalingTests(unittest.TestCase):
                 context=REQUEST_TOKEN.set('request-token')
                 try:self.assertEqual(token(),'request-token')
                 finally:REQUEST_TOKEN.reset(context)
+    def test_region_override_is_used_for_scaling(self):
+        import cloud_scaling
+        seen=[]
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*a):return False
+            def read(self):return b'{"ok":true}'
+        class Opener:
+            def open(self,request,timeout=None):seen.append(request);return Response()
+        env={'SCOUT_VERCEL_SCALER_TOKEN':'t','SCOUT_VERCEL_PROJECT_ID':'p','SCOUT_VERCEL_TEAM_ID':'team'}
+        self.assertEqual(cloud_scaling.DAEMON_REGION,'sin1')
+        with patch.dict(os.environ,env,clear=True),patch.object(cloud_scaling,'DAEMON_REGION','hkg1'),patch('urllib.request.build_opener',return_value=Opener()):self.assertTrue(set_instances(1))
+        self.assertEqual(json.loads(seen[0].data),{'hkg1':1})
     def test_scales_only_fixed_project_region_and_does_not_leak_credentials(self):
         seen=[]
         class Opener:
