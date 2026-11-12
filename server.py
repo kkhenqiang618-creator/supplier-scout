@@ -115,13 +115,75 @@ class Store:
         item=dict(row)
         for key in ['contacts','offers','sources','warnings','contact_result']: item[key]=json.loads(item[key])
         return item
+    def workspace_key(self,kind):
+        # settings has a global primary key even with tenant RLS enabled.
+        username=getattr(self,'username',None)
+        return kind+(':user:'+username if username else '')
+    def setting(self,key,default=None):
+        with self.connect() as db:row=db.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
+        return json.loads(row['value']) if row else default
+    def followups(self):
+        return self.setting(self.workspace_key('followups'),{})
+    def save_followup(self,sid,status,note):
+        with self.lock,self.connect() as db:
+            self.get(sid)
+            if status not in ('waiting','replied','quote','done'):raise ValueError('跟进状态无效')
+            if not isinstance(note,str) or not note.strip() or len(note)>5000:raise ValueError('请填写 1–5000 字联系记录')
+            records=self.followups();previous=records.get(str(sid),{})
+            stamp=now();entry={'status':status,'note':note.strip(),'updated_at':stamp}
+            history=list(previous.get('history') or [])
+            if previous and not history:history=[{key:previous.get(key) for key in ('status','note','updated_at')}]
+            record={'id':sid,**entry,'created_at':previous.get('created_at') or stamp,'history':(history+[entry])[-100:]}
+            records[str(sid)]=record
+            db.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(self.workspace_key('followups'),encode(records)))
+            return record
+    def draft_recipient(self,sid):
+        row=self.get(sid)
+        saved=self.setting(self.workspace_key('draft-recipient')+':'+str(sid))
+        emails=row['contacts'].get('email',[])
+        recipient=saved if saved is not None else (emails[0] if emails else None)
+        return self.validate_recipient(row,recipient)
+    @staticmethod
+    def validate_recipient(row,recipient):
+        if not isinstance(recipient,str) or '\r' in recipient or '\n' in recipient or recipient not in row['contacts'].get('email',[]):
+            raise ValueError('收件人须为该供应商当前邮箱，请重新选择')
+        return recipient
+    def save_draft(self,sid,subject=None,body=None,**options):
+        with self.lock,self.connect() as db:
+            row=self.get(sid);default_subject,default_body=draft_content(row)
+            subject=str(default_subject if subject is None else subject);body=str(default_body if body is None else body)
+            if '\n' in subject or '\r' in subject or len(subject)>300 or len(body)>30000:raise ValueError('邮件内容格式或长度无效')
+            recipient=self.validate_recipient(row,options['recipient']) if 'recipient' in options else self.draft_recipient(sid)
+            db.execute('INSERT INTO drafts(supplier_id,subject,body,created_at) VALUES(?,?,?,?) ON CONFLICT(supplier_id) DO UPDATE SET subject=excluded.subject,body=excluded.body,created_at=excluded.created_at',(sid,subject,body,now()))
+            db.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(self.workspace_key('draft-recipient')+':'+str(sid),encode(recipient)))
+        self.event('询价草稿已保存（未发送）',sid,row['mode'])
+        return {'ok':True,'recipient':recipient}
+    def workspace_state(self,data):
+        data['followups']=self.followups()
+        # One settings read for all drafts, including large existing workspaces.
+        prefix=self.workspace_key('draft-recipient')+':'
+        keys=[prefix+str(draft['supplier_id']) for draft in data['drafts']]
+        recipients={}
+        if keys:
+            with self.connect() as db:
+                recipients={row['key']:json.loads(row['value']) for row in db.execute('SELECT key,value FROM settings WHERE key IN ('+','.join('?' for _ in keys)+')',tuple(keys))}
+        for draft in data['drafts']:
+            draft['recipient']=recipients.get(prefix+str(draft['supplier_id']))
+        return data
+    def pricing(self,mode='real'):
+        if mode not in ('real','demo'):raise ValueError('报价模式无效')
+        with self.lock,self.connect() as db:
+            fields=('id','name','url','mode','offers','checked_at')
+            suppliers=[{key:json.loads(row[key]) if key=='offers' else row[key] for key in fields} for row in db.execute('SELECT id,name,url,mode,offers,checked_at FROM suppliers WHERE mode=? ORDER BY id',(mode,))]
+            history=[dict(row,offers=json.loads(row['offers'])) for row in db.execute('SELECT * FROM history WHERE mode=? ORDER BY id DESC',(mode,))]
+            return {'suppliers':suppliers,'history':history,'rules':self.rules()}
     def state(self):
         with self.lock,self.connect() as db:
-            return {'suppliers':[self.decode_row(r) for r in db.execute('SELECT * FROM suppliers ORDER BY id')],
+            return self.workspace_state({'suppliers':[self.decode_row(r) for r in db.execute('SELECT * FROM suppliers ORDER BY id')],
                 'rules':self.rules(),'events':[dict(r) for r in db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 300')],
                 'history':[dict(r,offers=json.loads(r['offers'])) for r in db.execute('SELECT * FROM history ORDER BY id DESC LIMIT 500')],
                 'drafts':[dict(r) for r in db.execute('SELECT * FROM drafts ORDER BY id DESC')], 'job':dict(self.job),
-                'model_service':self.model_service.public(),'integrations':{'email':False,'feishu':False,'llm':self.model_service.public()['tested']},'version':'0.1.0'}
+                'model_service':self.model_service.public(),'integrations':{'email':False,'feishu':False,'llm':self.model_service.public()['tested']},'version':'0.1.0'})
     def import_rows(self,rows):
         valid,rejected=prepare_rows(rows)
         if rejected: raise ValueError('第 '+str(rejected[0]['row'])+' 行：'+rejected[0]['reason'])
@@ -305,11 +367,11 @@ def draft_content(row):
 '''
     return subject,body
 
-def make_draft(row,subject=None,body=None):
+def make_draft(row,subject=None,body=None,recipient=None):
     default_subject,default_body=draft_content(row); msg=EmailMessage(policy=policy.SMTP)
     emails=row['contacts'].get('email',[])
     if not emails: raise ValueError('该供应商没有邮箱，请先补充联系方式')
-    msg['To']=emails[0]; msg['Subject']=subject or default_subject; msg['X-Unsent']='1'
+    msg['To']=Store.validate_recipient(row,emails[0] if recipient is None else recipient); msg['Subject']=subject or default_subject; msg['X-Unsent']='1'
     msg.set_content(body or default_body)
     return msg.as_bytes()
 
@@ -329,6 +391,7 @@ class Handler(BaseHTTPRequestHandler):
         path=urlsplit(self.path).path; params=parse_qs(urlsplit(self.path).query); store=self.store
         try:
             if path=='/api/state': return self.send(store.state())
+            if path=='/api/pricing': return self.send(store.pricing(params.get('mode',['real'])[0]))
             if path=='/api/export-contacts':
                 mode=params.get('mode',['real'])[0];output=io.StringIO();writer=csv.writer(output)
                 writer.writerow(['编号','网址','本轮联系状态','类型','联系方式','用途','来源','原文证据','风险/备注','最近检查'])
@@ -355,8 +418,8 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/draft':
                 sid=int(params.get('id',['0'])[0]); row=store.get(sid)
                 with store.connect() as db: saved=db.execute('SELECT * FROM drafts WHERE supplier_id=?',(sid,)).fetchone()
-                return self.send(make_draft(row,saved['subject'] if saved else None,saved['body'] if saved else None),ctype='message/rfc822',filename='inquiry-'+str(sid)+'.eml')
-            name={'/':'index.html','/app.js':'app.js','/admin.js':'admin.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/vendor/qrcode.js':'vendor/qrcode.js'}.get(path)
+                return self.send(make_draft(row,saved['subject'] if saved else None,saved['body'] if saved else None,store.draft_recipient(sid)),ctype='message/rfc822',filename='inquiry-'+str(sid)+'.eml')
+            name={'/':'index.html','/app.js':'app.js','/admin.js':'admin.js','/workspace.js':'workspace.js','/workspace.css':'workspace.css','/style.css':'style.css','/favicon.svg':'favicon.svg','/vendor/qrcode.js':'vendor/qrcode.js'}.get(path)
             if name:
                 mime={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'}[Path(name).suffix]
                 return self.send((ROOT/'static'/name).read_bytes(),ctype=mime)
@@ -395,13 +458,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path=='/api/run': result=store.start_job(data.get('mode'),data.get('ids'),data.get('scope','all'),data.get('selection','remaining'))
             elif path=='/api/review': store.review(int(data['id']),data['status'],data['note']); result={'ok':True}
             elif path=='/api/rules': store.update_rules(data['rules']); result={'ok':True}
+            elif path=='/api/followup': result=store.save_followup(int(data['id']),data['status'],data['note'])
             elif path=='/api/drafts':
-                row=store.get(int(data['id'])); subject,body=draft_content(row)
-                subject=str(data.get('subject',subject)); body=str(data.get('body',body))
-                if '\n' in subject or '\r' in subject or len(subject)>300 or len(body)>30000: raise ValueError('邮件内容格式或长度无效')
-                if not row['contacts'].get('email'): raise ValueError('该供应商没有邮箱')
-                with store.lock,store.connect() as db: db.execute('INSERT INTO drafts(supplier_id,subject,body,created_at) VALUES(?,?,?,?) ON CONFLICT(supplier_id) DO UPDATE SET subject=excluded.subject,body=excluded.body,created_at=excluded.created_at',(row['id'],subject,body,now()))
-                store.event('询价草稿已保存（未发送）',row['id'],row['mode']); result={'ok':True}
+                options={'recipient':data['recipient']} if 'recipient' in data else {}
+                result=store.save_draft(int(data['id']),data.get('subject'),data.get('body'),**options)
             elif path=='/api/reply':
                 import html
                 row=store.get(int(data['id'])); content=str(data.get('text','')).strip()

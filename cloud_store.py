@@ -156,6 +156,8 @@ class PostgresStore(Store):
             return Store.save_result(self,sid,dict(result,contacts=contacts,sources=sources))
     def save_contacts(self,*args,**kwargs):return self._write(Store.save_contacts,*args,**kwargs)
     def review(self,*args,**kwargs):return self._write(Store.review,*args,**kwargs)
+    def save_followup(self,*args,**kwargs):return self._write(Store.save_followup,*args,**kwargs)
+    def save_draft(self,*args,**kwargs):return self._write(Store.save_draft,*args,**kwargs)
     def update_rules(self,rules):
         from engine import validate_rules
         validate_rules(rules)
@@ -200,6 +202,7 @@ class PostgresStore(Store):
                     'history':[dict(row,offers=json.loads(row['offers'])) for row in db.execute('SELECT * FROM history ORDER BY id DESC LIMIT 30')],
                     'drafts':[dict(row) for row in db.execute('SELECT * FROM drafts ORDER BY id DESC')],'job':self.job,
                     'model_service':self.model_service.public(),'integrations':{'email':False,'feishu':False,'llm':self.model_service.public()['tested']},'version':'0.1.0'}
+        if not full:self.workspace_state(data)
         data.update(deployment='cloud',auth_enabled=True,username=getattr(self,'username',''),is_admin=getattr(self,'is_admin',False),limits={'file_bytes':3*1024*1024})
         return data
     def team_overview(self,names):
