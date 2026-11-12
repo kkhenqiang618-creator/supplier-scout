@@ -158,58 +158,101 @@ class FallbackFailureTests(Harness):
         result, events, _ = self.site([PLAIN, WEAK], [GOOD], [json.dumps({'action': {'type': 'open', 'url': URL}}), FINISH, FOUND])
         self.assertEqual(events.count(('start', 'Chrome')), 1); self.assertEqual(result['contact_status'], 'found')
 
-class SoftDeadlineTests(Harness):
-    def test_healthy_site_keeps_all_steps(self):
-        # Strong pages never tighten Moli to MOLI_BUDGET: 40s per step still runs all 12 steps (12*40=480 < SITE_BUDGET-STEP_RESERVE).
-        for seconds in [15, 25, 40]:
-            with self.subTest(seconds=seconds):
-                now = [0.0]; answers = [json.dumps({'action': {'type': 'wait'}})] * 12; events = []; calls = []
-                def complete(messages): now[0] += seconds; calls.append(1); return answers.pop(0)
-                with tempfile.TemporaryDirectory() as folder:
-                    service = ModelService(os.path.join(folder, 'model.json')); service.save({'base_url': 'https://model.example/v1', 'model': 'fixture'}); data = service.read(); data['tested'] = True; service._write(data)
-                    with patch('browser_agent.validate_url'), patch('engine.fetch', return_value=('User-agent: *\nAllow: /', URL + 'robots.txt')), patch.object(service, 'complete', side_effect=complete):
-                        result = run_site(URL, 'contacts', service, [], moli_factory=factory('Moli', [PLAIN], events), chrome_factory=factory('Chrome', [GOOD], events), clock=lambda: now[0], chrome_ready=lambda: True)
-                self.assertEqual(len(calls), 12); self.assertNotIn(browser_agent.SOFT_DEADLINE_WARNING, result['warnings']); self.assertNotIn(('start', 'Chrome'), events)
+WAIT = json.dumps({'action': {'type': 'wait'}})
 
-    def test_weak_page_tightens_moli_to_its_budget(self):
-        now = [0.0]; answers = [json.dumps({'action': {'type': 'wait'}})] * 12; events = []; calls = []
-        def complete(messages): now[0] += 40; calls.append(1); return answers.pop(0)
+class SoftDeadlineTests(Harness):
+    def timed(self, scope, moli, chrome, seconds, answers=None, first=None):
+        """run_site on a fake clock: each model call advances it by `seconds` (the first call by `first` if given)."""
+        now = [0.0]; answers = list(answers or [WAIT] * 40); events = []; calls = []
+        def complete(messages):
+            now[0] += first if first is not None and not calls else seconds
+            calls.append(json.loads(messages[1]['content'])); return answers.pop(0)
         with tempfile.TemporaryDirectory() as folder:
             service = ModelService(os.path.join(folder, 'model.json')); service.save({'base_url': 'https://model.example/v1', 'model': 'fixture'}); data = service.read(); data['tested'] = True; service._write(data)
             with patch('browser_agent.validate_url'), patch('engine.fetch', return_value=('User-agent: *\nAllow: /', URL + 'robots.txt')), patch.object(service, 'complete', side_effect=complete):
-                result = run_site(URL, 'contacts', service, [], moli_factory=factory('Moli', [PLAIN, WEAK], events), chrome_factory=factory('Chrome', [GOOD], events), clock=lambda: now[0], chrome_ready=lambda: True)
-        # Moli: steps at t=0,40,80,120 (360-160<210 stops at the 5th); Chrome then gets the rest of SITE_BUDGET.
+                result = run_site(URL, scope, service, [], moli_factory=factory('Moli', list(moli), events), chrome_factory=factory('Chrome', list(chrome), events), clock=lambda: now[0], chrome_ready=lambda: True)
+        return result, events, calls
+
+    def test_healthy_site_keeps_all_steps(self):
+        # Strong pages never tighten Moli to its weak budget. Full: 12*40=480 < 810-210. Contacts: step 8 starts at 7*20=140, 300-140 >= 110.
+        for scope, steps, seconds in [('all', 12, 15), ('all', 12, 25), ('all', 12, 40), ('contacts', 8, 5), ('contacts', 8, 14), ('contacts', 8, 20)]:
+            with self.subTest(scope=scope, seconds=seconds):
+                result, events, calls = self.timed(scope, [PLAIN], [GOOD], seconds)
+                self.assertEqual(len(calls), steps); self.assertNotIn(browser_agent.SOFT_DEADLINE_WARNING, result['warnings']); self.assertNotIn(('start', 'Chrome'), events)
+
+    def test_step_cap_per_scope_and_steps_remaining(self):
+        for scope, cap in [('contacts', 8), ('all', 12)]:
+            with self.subTest(scope=scope):
+                result, events, calls = self.timed(scope, [PLAIN], [GOOD], 1)
+                self.assertEqual(len(calls), cap); self.assertEqual([c['steps_remaining'] for c in calls], list(range(cap, 0, -1)))
+                self.assertIn('达到本次单站动作预算，检查尚未完成，可单独继续', result['warnings'])
+        self.assertEqual((browser_agent.CONTACTS_MAX_STEPS, browser_agent.MAX_STEPS), (8, 12))
+
+    def test_chrome_retry_also_capped_at_eight_for_contacts(self):
+        # Moli PLAIN -> WEAK with nothing found triggers Chrome; each browser run gets its own 8-step cap.
+        result, events, calls = self.timed('contacts', [PLAIN, WEAK], [GOOD], 1)
+        self.assertEqual(events.count(('start', 'Chrome')), 1); self.assertEqual(len(calls), 16)
+        self.assertEqual([s['browser'] for s in result['steps']].count('Chrome'), 8)
+
+    def test_weak_page_tightens_moli_to_its_budget(self):
+        # Full: steps at t=0,40,80,120 (360-160<210 stops at the 5th); Chrome then gets the rest of SITE_BUDGET.
+        result, events, _ = self.timed('all', [PLAIN, WEAK], [GOOD], 40)
         self.assertEqual(sum(1 for e in events if e[:2] == ('cmd', 'Moli')), 5); self.assertEqual(events.count(('start', 'Chrome')), 1)
+        # Contacts: steps at t=0,20,40 (150-60<110 stops the 4th); Chrome starts at t=60 and may start steps until 300-110=190 (t=60..180: 7 steps).
+        result, events, calls = self.timed('contacts', [PLAIN, WEAK], [GOOD], 20)
+        self.assertEqual(sum(1 for e in events if e[:2] == ('cmd', 'Moli')), 4); self.assertEqual(events.count(('start', 'Chrome')), 1)
+        self.assertEqual([s['browser'] for s in result['steps']].count('Chrome'), 7); self.assertIn(browser_agent.SOFT_DEADLINE_WARNING, result['warnings'])
+
+    def test_contacts_soft_deadline_300_is_respected(self):
+        # 30s per step on strong pages: steps start at t=0..180 (300-180=120 >= 110), the 8th at t=210 would leave 90 < 110.
+        result, events, calls = self.timed('contacts', [PLAIN], [GOOD], 30)
+        self.assertEqual(len(calls), 7); self.assertIn(browser_agent.SOFT_DEADLINE_WARNING, result['warnings']); self.assertNotIn(('start', 'Chrome'), events)
+        self.assertLessEqual(30 * (len(calls) - 1), browser_agent.CONTACTS_SITE_BUDGET - browser_agent.CONTACTS_STEP_RESERVE)
 
     def test_moli_stops_before_its_soft_deadline_and_chrome_skipped_when_site_budget_gone(self):
-        clock = Clock(step=60)  # each clock read advances 60s: Moli hits MOLI_BUDGET-STEP_RESERVE quickly
-        wait = json.dumps({'action': {'type': 'wait'}})
-        result, events, calls = self.site([PLAIN, WEAK], [GOOD], [wait] * 12, clock=clock)
-        self.assertLess(len(calls), 12); self.assertIn(browser_agent.SOFT_DEADLINE_WARNING, result['warnings'])
+        clock = Clock(step=60)  # each clock read advances 60s: Moli hits its weak budget minus the reserve quickly
+        result, events, calls = self.site([PLAIN, WEAK], [GOOD], [WAIT] * 12, clock=clock)
+        self.assertLess(len(calls), 8); self.assertIn(browser_agent.SOFT_DEADLINE_WARNING, result['warnings'])
         self.assertNotIn('_fallback', result)
 
     def test_no_step_starts_with_less_than_reserve(self):
-        clock = Clock(); clock.now = 0
-        def ticking(): return clock.now
-        events = []; answers = [json.dumps({'action': {'type': 'wait'}})] * 12; spent = []
-        with tempfile.TemporaryDirectory() as folder:
-            service = ModelService(os.path.join(folder, 'model.json')); service.save({'base_url': 'https://model.example/v1', 'model': 'fixture'}); data = service.read(); data['tested'] = True; service._write(data)
-            def complete(messages): clock.now += 100; spent.append(clock.now); return answers.pop(0)
-            with patch('browser_agent.validate_url'), patch('engine.fetch', return_value=('User-agent: *\nAllow: /', URL + 'robots.txt')), patch.object(service, 'complete', side_effect=complete):
-                result = browser_agent.run_agent(URL, 'contacts', service, [], browser_factory=factory('Moli', [PLAIN], events), deadline=360, clock=ticking)
-        # Steps start at t=0 and t=100 (360-100=260 >= 210); at t=200 only 160 left, so no third step.
-        self.assertEqual(spent, [100, 200]); self.assertIn(browser_agent.SOFT_DEADLINE_WARNING, result['warnings'])
+        # deadline=360: full reserve 210 -> steps at t=0,100 only; contacts reserve 110 -> steps at t=0,100,200 (360-300=60 < 110).
+        for scope, expected in [('all', [100, 200]), ('contacts', [100, 200, 300])]:
+            with self.subTest(scope=scope):
+                now = [0]; events = []; spent = []
+                def complete(messages): now[0] += 100; spent.append(now[0]); return WAIT
+                with tempfile.TemporaryDirectory() as folder:
+                    service = ModelService(os.path.join(folder, 'model.json')); service.save({'base_url': 'https://model.example/v1', 'model': 'fixture'}); data = service.read(); data['tested'] = True; service._write(data)
+                    with patch('browser_agent.validate_url'), patch('engine.fetch', return_value=('User-agent: *\nAllow: /', URL + 'robots.txt')), patch.object(service, 'complete', side_effect=complete):
+                        result = browser_agent.run_agent(URL, scope, service, [], browser_factory=factory('Moli', [PLAIN], events), deadline=360, clock=lambda: now[0])
+                self.assertEqual(spent, expected); self.assertIn(browser_agent.SOFT_DEADLINE_WARNING, result['warnings'])
 
     def test_chrome_not_started_without_budget(self):
-        clock = Clock(); clock.now = 0
-        def ticking(): return clock.now
+        result, events, _ = self.timed('contacts', [PLAIN, WEAK], [GOOD], 500, [FINISH])
+        self.assertNotIn(('start', 'Chrome'), events)
+
+    def test_contacts_chrome_skipped_below_reserve_but_full_mode_still_retries(self):
+        # One 200s step, page turns weak, nothing found. Contacts: 300-200=100 < 110 -> no Chrome. Full: 810-200=610 >= 210 -> Chrome.
+        result, events, _ = self.timed('contacts', [PLAIN, WEAK], [GOOD], 200, [WAIT, FINISH])
+        self.assertNotIn(('start', 'Chrome'), events); self.assertIn('本站剩余时间不足，未启动 Chrome 备用浏览器', result['warnings'])
+        result, events, _ = self.timed('all', [PLAIN, WEAK], [GOOD], 1, [WAIT, FINISH, FINISH], first=200)
+        self.assertEqual(events.count(('start', 'Chrome')), 1)
+        # Chrome needs reserve + launch/open headroom (110+50=160): 300-140=160 starts it, 300-150=150 (above the bare reserve) does not.
+        result, events, _ = self.timed('contacts', [PLAIN, WEAK], [GOOD], 1, [WAIT, FINISH], first=140)
+        self.assertEqual(events.count(('start', 'Chrome')), 1)
+        result, events, _ = self.timed('contacts', [PLAIN, WEAK], [GOOD], 1, [WAIT, FINISH], first=150)
+        self.assertNotIn(('start', 'Chrome'), events); self.assertIn('本站剩余时间不足，未启动 Chrome 备用浏览器', result['warnings'])
+
+    def test_run_cut_before_first_step_on_weak_page_stays_render_weak(self):
+        # A browser run that reaches its deadline at step 1 on a weak homepage must not count as a good Chrome render in merge_results.
         events = []
         with tempfile.TemporaryDirectory() as folder:
             service = ModelService(os.path.join(folder, 'model.json')); service.save({'base_url': 'https://model.example/v1', 'model': 'fixture'}); data = service.read(); data['tested'] = True; service._write(data)
-            def complete(messages): clock.now += 500; return FINISH
-            with patch('browser_agent.validate_url'), patch('engine.fetch', return_value=('User-agent: *\nAllow: /', URL + 'robots.txt')), patch.object(service, 'complete', side_effect=complete):
-                result = run_site(URL, 'contacts', service, [], moli_factory=factory('Moli', [PLAIN, WEAK], events), chrome_factory=factory('Chrome', [GOOD], events), clock=ticking)
-        self.assertNotIn(('start', 'Chrome'), events)
+            with patch('browser_agent.validate_url'), patch('engine.fetch', return_value=('User-agent: *\nAllow: /', URL + 'robots.txt')), patch.object(service, 'complete', side_effect=AssertionError('no model call')):
+                chrome = browser_agent.run_agent(URL, 'contacts', service, [], browser_factory=factory('Chrome', [WEAK], events), deadline=100, clock=lambda: 0)
+        self.assertTrue(chrome['render_weak']); self.assertIn(browser_agent.SOFT_DEADLINE_WARNING, chrome['warnings'])
+        merged = merge_results({'contact_records': [], 'sources': [{'url': URL}], 'render_weak': True, 'warnings': [browser_agent.RENDER_WEAK_WARNING]}, browser_agent.strip_internal(chrome))
+        self.assertTrue(merged['render_weak']); self.assertEqual(merged['contact_summary'], browser_agent.BOTH_WEAK_SUMMARY)
 
 class MergeTests(unittest.TestCase):
     def test_union_dedup_and_additional_sources(self):
@@ -241,8 +284,31 @@ class WiringTests(unittest.TestCase):
     def test_collection_worker_and_server_timeouts(self):
         root = Path(__file__).resolve().parents[1]
         self.assertIn('result=run_site(', (root / 'collection_worker.py').read_text(encoding='utf-8'))
-        server = (root / 'server.py').read_text(encoding='utf-8'); self.assertIn('time.monotonic()+840', server); self.assertIn('14 分钟', server)
-        self.assertLess(browser_agent.SITE_BUDGET, 840); self.assertLess(browser_agent.MOLI_BUDGET, browser_agent.SITE_BUDGET - browser_agent.STEP_RESERVE)
+        import server
+        self.assertEqual(server.SITE_HARD_TIMEOUT, {'all': 840, 'contacts': 480})
+        # Worst step = 3 x 45s model requests + 40s retry sleeps + one 30s browser command = 205s; the last step may start at soft - reserve,
+        # so even that worst step ends before the scope's hard timeout. Contacts also covers a hanging new-origin robots.txt (~55s) and browser close (~15s).
+        worst = 3 * 45 + 40 + 30
+        self.assertLess(browser_agent.CONTACTS_SITE_BUDGET - browser_agent.CONTACTS_STEP_RESERVE + worst + 55 + 15, server.SITE_HARD_TIMEOUT['contacts'])
+        for scope in ['all', 'contacts']:
+            budget = browser_agent.site_budget(scope)
+            self.assertGreaterEqual(budget['reserve'], 2 * (14 + 30))  # >= two P90 model steps plus full 30s browser commands before the soft deadline
+            self.assertLess(budget['site'] - budget['reserve'] + worst, server.SITE_HARD_TIMEOUT[scope])
+            self.assertLess(budget['moli'], budget['site'] - budget['reserve'])
+        self.assertEqual((browser_agent.SITE_BUDGET, browser_agent.MOLI_BUDGET, browser_agent.STEP_RESERVE), (810, 360, 210))
+
+    def test_collect_site_uses_scope_aware_hard_timeout(self):
+        import io, threading, types
+        import server
+        class Process:
+            pid = 0
+            def __init__(self): self.stdout = io.StringIO('')
+            def poll(self): return 0
+        for scope, elapsed, message in [('contacts', 481, '单站 Agent 超过 8 分钟'), ('all', 841, '单站 Agent 超过 14 分钟'), ('contacts', 479, '采集进程意外结束'), ('all', 839, '采集进程意外结束')]:
+            with self.subTest(scope=scope, elapsed=elapsed):
+                reads = iter([0.0]); fake = types.SimpleNamespace(monotonic=lambda: next(reads, elapsed))
+                with patch('server.subprocess.Popen', return_value=Process()), patch('server.time', fake):
+                    with self.assertRaisesRegex(ValueError, message): server.collect_site(URL, lambda m: None, threading.Event(), scope)
 
     def test_chrome_browser_always_uses_guard_proxy(self):
         events = []

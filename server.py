@@ -41,6 +41,8 @@ class ModelTransientSiteError(ValueError):
     .partial is a run_agent-shaped result (contacts, contact_records, contact_status, contact_summary, sources, steps, warnings, offers, scope, model_transient=True) with records found so far, or None."""
     def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
 
+# Hard per-site cut-off; stays above browser_agent's soft deadline - reserve + worst step tail for each scope (see the budget comment there).
+SITE_HARD_TIMEOUT={'all':840,'contacts':480}
 def collect_site(url,log,stop_event,scope="all",model_path=None,rules=None):
     if stop_event.is_set(): raise CollectionCancelled()
     command=[sys.executable,str(ROOT/'collection_worker.py'),url,scope,str(model_path or ROOT/'data'/'model-service.json'),encode(rules or [])]
@@ -51,11 +53,11 @@ def collect_site(url,log,stop_event,scope="all",model_path=None,rules=None):
             for line in process.stdout: messages.put(line)
         finally: messages.put(None)
     threading.Thread(target=read_output,daemon=True).start()
-    deadline=time.monotonic()+840
+    limit=SITE_HARD_TIMEOUT.get(scope,SITE_HARD_TIMEOUT['all']);deadline=time.monotonic()+limit
     try:
         while True:
             if stop_event.is_set(): raise CollectionCancelled()
-            if time.monotonic()>deadline: raise ValueError('单站 Agent 超过 14 分钟，已停止；可稍后单独继续')
+            if time.monotonic()>deadline: raise ValueError('单站 Agent 超过 '+str(limit//60)+' 分钟，已停止；可稍后单独继续')
             try: line=messages.get(timeout=.1)
             except queue.Empty: continue
             if line is None: raise ValueError('采集进程意外结束，请查看该网站后重试')

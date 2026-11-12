@@ -352,17 +352,20 @@ SYSTEM='''你是供应商信息采集浏览器Agent。根据每一轮真实页�
 每轮输出JSON：{"reason":"选择下一步的简短中文依据","action":{"type":"click","ref":"c1"},"contacts":[{"type":"email/phone/wechat/qq/qq_group/wechat_link/official_account/telegram/discord/contact_form/online_service/qrcode/other","value":"真实原值或真实联系链接","purpose":"商务/客服/技术支持/待确认等","source_url":"实际来源页面","evidence":"逐字证据","risk_flags":[]}],"offers":[],"missing_information":[]}。
 contacts是本轮新发现，不重复输出已知项。缺失项写null或[]，不编造。只有本轮可核实的来源才提取；第三方平台和归属不明须标风险。
 全量模式才收集目标模型报价，model必须是传入规则model的一个值，保留model_name、input_price/output_price/cache_price、currency、unit、group、group_multiplier、resource_form、source、evidence、notes；price_text保留范围价和条件。不把分组倍率、充值折扣冒充官方目录折扣，ratio不能确认时为null。仅联系方式模式不要查看、提取或判断报价。
+上下文steps_remaining是本轮剩余观察次数（含本次）；次数少时优先页尾、联系/关于页、公告/铃铛、客服入口和二维码，再看文档或子站；steps_remaining为1时本次结果之后不再观察新页面，应提取已见渠道并finish。
 当合理检查完或已找到足够可用渠道时finish；不要无止境翻页。若任务预算用尽，保留已有事实，说明未完成。'''
 
 SOFT_DEADLINE_WARNING='本站检查时间已用完，保留已核实的结果，可单独继续'
 CONTACT_HINT=re.compile(r'[^\s@]+@[^\s@]+\.[a-z]{2,}|微信|wechat|weixin|QQ|t\.me/|telegram|discord|电话|手机|tel:|mailto:|(?<!\d)1[3-9]\d{9}(?!\d)',re.I)
-def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12,browser_factory=Browser,deadline=None,escalate_weak=False,clock=time.monotonic,weak_deadline=None):
-    """deadline: soft monotonic deadline; no new step starts with less than STEP_RESERVE left. weak_deadline: the tighter deadline that
+def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=None,browser_factory=Browser,deadline=None,escalate_weak=False,clock=time.monotonic,weak_deadline=None):
+    """max_steps: model steps for this browser run (None -> the scope's cap, see site_budget).
+    deadline: soft monotonic deadline; no new step starts with less than the scope's step reserve left. weak_deadline: the tighter deadline that
     applies once a page was weak (or the browser died) and nothing has been found, leaving time for the Chrome retry.
     escalate_weak: when the first page is render_weak and shows no contact-like text, one program-side wait (no model call);
     still weak -> end now so run_site can hand over to Chrome.
     Returns an internal _fallback={weak,dead,escalated} that run_site reads and removes."""
     if scope not in ['all','contacts']:raise ValueError('采集模式无效')
+    budget=site_budget(scope);reserve=budget['reserve'];max_steps=budget['max_steps'] if max_steps is None else max_steps
     service=model_service if isinstance(model_service,ModelService) else ModelService(model_service)
     if not service.public()['configured']:raise AgentServiceError('请先配置 API URL、模型名和 API Key')
     validate_url(url)
@@ -412,10 +415,11 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
                     warnings.append(RENDER_WEAK_WARNING+('（页面脚本无响应）' if snapshot.get('page_unresponsive') else '（页面加载超时）' if snapshot.get('goto_timeout') else ''))
                     log(label+' 等待后仍渲染不完整，结束本轮');finished=True;break
                 if snapshot.get('render_weak') or snapshot.get('page_unresponsive') or snapshot.get('goto_timeout'):fallback['weak']=True
-                if current_deadline() is not None and current_deadline()-clock()<STEP_RESERVE:
-                    warnings.append(SOFT_DEADLINE_WARNING);log(SOFT_DEADLINE_WARNING);finished=True;break
+                # Record a weak page before the deadline check: a run cut here must not read as a good render (merge_results' chrome_ok).
                 if snapshot.get('render_weak'):
                     weak.append(snapshot.get('url'));warnings.append(RENDER_WEAK_WARNING+('（页面脚本无响应）' if snapshot.get('page_unresponsive') else '（页面加载超时）' if snapshot.get('goto_timeout') else ''))
+                if current_deadline() is not None and current_deadline()-clock()<reserve:
+                    warnings.append(SOFT_DEADLINE_WARNING);log(SOFT_DEADLINE_WARNING);finished=True;break
                 valid_sources={s['url']:observed_text(s) for s in observations}
                 context={'task':'仅采集联系方式，不处理报价' if scope=='contacts' else '采集联系方式及目标模型报价','supplier_url':url,'rules':rules if scope=='all' else [],'step':index+1,'steps_remaining':max_steps-index,'known_contacts':records,'known_offers':offers,'history':steps[-6:],'warnings':warnings[-5:],'page':snapshot}
                 log('Agent 第 '+str(index+1)+' 步：观察 '+snapshot['url'])
@@ -504,9 +508,25 @@ def run_agent(url,scope,model_service,rules,log=lambda message:None,max_steps=12
             if browser:browser.close()
     return result()
 
-# Per-site time budget (seconds from run_site start). server.collect_site's hard timeout (840s) discards the whole result, so
-# both runs stop on these soft deadlines first. STEP_RESERVE ~ worst case of three model attempts plus one browser command.
-MOLI_BUDGET=360;SITE_BUDGET=810;STEP_RESERVE=210
+# Per-site time budget (seconds from run_site start). server.collect_site's hard timeout (SITE_HARD_TIMEOUT there) discards the whole
+# result, so both runs stop on these soft deadlines first. One worst-case step = complete() 3 x 45s requests + 40s retry sleeps = 175s,
+# plus one browser command (worker bounds it ~24s, read timeout 30s) = 205s; a QR step's decoder attempts stop QR_RESERVE before the deadline.
+# An open/click to a new origin also fetches its robots.txt first: a hanging host costs 2 x (12s urllib + 15s curl) + 1.5s ~ 55s (each extra
+# curl redirect adds up to 15s more); browser.close() afterwards takes up to ~15s (Chrome: worker 8s + Moli 5s + proxy 2s). Worst tail ~ 275s.
+# Full mode ('all', prices + contacts): 12 steps per browser run; STEP_RESERVE=210 covers the 205s step, 810-210+205=805 < 840 hard
+# (with robots + close 600+275=875 > 840: a rare pre-existing gap, left as is so full mode keeps its budget).
+MOLI_BUDGET=360;SITE_BUDGET=810;STEP_RESERVE=210;MAX_STEPS=12
+# Contacts-only mode (phase 3 plan B): production data (37 sites, 47 contacts) keeps 87% of contacts at 8 steps per run, median 5s and
+# P90 14s per step. Last step may start at 300-110=190s: a normal 8-step run (8 x 5-14s = 40-112s, plus launch/open ~10-20s) fits well
+# inside that; worst case 190+275=465s still ends before the 480s hard timeout.
+# Weak page with nothing found: Moli stops at 150-110=40s of steps, so Chrome keeps most of the budget. A browser run spends up to
+# BROWSER_STARTUP (launch READY_TIMEOUT 20s + first open COMMAND_TIMEOUT 30s) before its first deadline check, so Chrome (and the Moli
+# re-run after a failed Chrome) starts only with reserve + BROWSER_STARTUP left (contacts 160s, full 260s); otherwise it could not take a step.
+CONTACTS_MOLI_BUDGET=150;CONTACTS_SITE_BUDGET=300;CONTACTS_STEP_RESERVE=110;CONTACTS_MAX_STEPS=8
+BROWSER_STARTUP=READY_TIMEOUT+COMMAND_TIMEOUT
+def site_budget(scope):
+    if scope=='contacts':return {'max_steps':CONTACTS_MAX_STEPS,'moli':CONTACTS_MOLI_BUDGET,'site':CONTACTS_SITE_BUDGET,'reserve':CONTACTS_STEP_RESERVE}
+    return {'max_steps':MAX_STEPS,'moli':MOLI_BUDGET,'site':SITE_BUDGET,'reserve':STEP_RESERVE}
 CHROME_RETRIED='Moli 渲染不完整，已改用 Chrome 重试'
 NO_CHROME_WARNING='未安装 Chrome 备用浏览器，仅使用 Moli'
 BOTH_WEAK_SUMMARY='Moli 与 Chrome 均未能完整渲染页面，未能判定联系方式，可稍后重试'
@@ -544,10 +564,12 @@ def merge_results(moli,chrome):
         'offers':offers,'scope':moli.get('scope') or chrome.get('scope')}
 def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browser,chrome_factory=ChromeBrowser,clock=time.monotonic,chrome_ready=chrome_available):
     """Moli first; at most one Chrome retry (started only after Moli's browser is closed by run_agent's finally).
-    Moli keeps the whole budget unless a page turns weak with nothing found; then it stops at MOLI_BUDGET to leave Chrome its time."""
-    start=clock();enabled=chrome_enabled();missing=enabled and not chrome_ready();enabled=enabled and not missing
+    Moli keeps the whole budget unless a page turns weak with nothing found; then it stops at the scope's Moli budget to leave Chrome its time.
+    Budgets come from site_budget(scope): contacts-only runs are shorter (8 steps per browser run, ~5 min); full mode keeps 12 steps / 810s."""
+    budget=site_budget(scope);reserve=budget['reserve'];startup=reserve+BROWSER_STARTUP
+    start=clock();site_end=start+budget['site'];enabled=chrome_enabled();missing=enabled and not chrome_ready();enabled=enabled and not missing
     def moli_run(escalate):
-        result=run_agent(url,scope,service,rules,log,browser_factory=moli_factory,deadline=start+SITE_BUDGET,weak_deadline=start+MOLI_BUDGET if escalate else None,escalate_weak=escalate,clock=clock)
+        result=run_agent(url,scope,service,rules,log,browser_factory=moli_factory,deadline=site_end,weak_deadline=start+budget['moli'] if escalate else None,escalate_weak=escalate,clock=clock)
         if missing:result['warnings'].append(NO_CHROME_WARNING)
         return result
     def only_moli(result,warning=None):
@@ -556,7 +578,7 @@ def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browse
         return result
     def without_chrome(result,warning):
         # The early hand-over skipped Moli's model steps; if Chrome then observed nothing, give Moli its normal run back while time allows.
-        if (result.get('_fallback') or {}).get('escalated') and start+SITE_BUDGET-clock()>=STEP_RESERVE:
+        if (result.get('_fallback') or {}).get('escalated') and site_end-clock()>=startup:
             log('Chrome 未能读取页面，回到 Moli 继续检查')
             try:again=moli_run(False)
             except AgentServiceError as error:strip_internal(getattr(error,'partial',None));raise
@@ -567,9 +589,9 @@ def run_site(url,scope,service,rules,log=lambda message:None,moli_factory=Browse
     except (AgentServiceError,ModelTransientSiteError) as error:strip_internal(getattr(error,'partial',None));raise
     except BrowserRuntimeError:raise
     if not enabled or not needs_chrome(moli):return only_moli(moli)
-    if start+SITE_BUDGET-clock()<STEP_RESERVE:return only_moli(moli,'本站剩余时间不足，未启动 Chrome 备用浏览器')
+    if site_end-clock()<startup:return only_moli(moli,'本站剩余时间不足，未启动 Chrome 备用浏览器')
     log('Moli 未能完整读取页面，改用 Chrome 备用浏览器重试')
-    try:chrome=run_agent(url,scope,service,rules,log,browser_factory=chrome_factory,deadline=start+SITE_BUDGET,clock=clock)
+    try:chrome=run_agent(url,scope,service,rules,log,browser_factory=chrome_factory,deadline=site_end,clock=clock)
     except ModelTransientSiteError as error:return only_moli(moli,'Chrome 备用浏览器未完成：'+str(error)[:300])
     except AgentServiceError as error:
         error.partial=merge_results(strip_internal(moli),strip_internal(error.partial or {}));raise
