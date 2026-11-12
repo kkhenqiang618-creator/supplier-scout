@@ -89,7 +89,7 @@ class PersonalKeyTests(unittest.TestCase):
             observed.append(json.loads(Path(path).read_text())['api_key'])
             return {'contacts':{},'sources':[],'contact_status':'incomplete'}
         job={'id':'job','position':0,'supplier_ids':[1],'mode':'real','scope':'contacts','state':{'requested_by':'小吴','_model_config':snapshot}}
-        with patch.object(cloud_worker,'collect_site',side_effect=collect):cloud_worker.execute_job(store,job,'lease',threading.Event())
+        with patch.object(cloud_worker,'collect_site',side_effect=collect),patch.object(cloud_worker,'self_check',return_value=None):cloud_worker.execute_job(store,job,'lease',threading.Event())
         self.assertEqual(observed,['original-secret']);store.finish_job.assert_called_with('job','lease','completed')
     def test_actual_http_uses_session_owner_and_ignores_forged_username(self):
         from http.server import ThreadingHTTPServer

@@ -34,12 +34,16 @@ def encode(value): return json.dumps(value,ensure_ascii=False,allow_nan=False)
 class CollectionCancelled(Exception): pass
 class AgentServiceError(ValueError):
     def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
+class BatchRuntimeError(ValueError):
+    """Browser runtime (Moli/Playwright) missing or refusing to start: stop the batch instead of marking every site blocked."""
 class ModelTransientSiteError(ValueError):
     """Model still unavailable after retries for this site only; the batch should continue.
     collect_site raises it for worker message {'kind':'error','fatal':False,'model_transient':True,'partial':...}.
     .partial is a run_agent-shaped result (contacts, contact_records, contact_status, contact_summary, sources, steps, warnings, offers, scope, model_transient=True) with records found so far, or None."""
     def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
 
+# Hard per-site cut-off; stays above browser_agent's soft deadline - reserve + worst step tail for each scope (see the budget comment there).
+SITE_HARD_TIMEOUT={'all':840,'contacts':480}
 def collect_site(url,log,stop_event,scope="all",model_path=None,rules=None):
     if stop_event.is_set(): raise CollectionCancelled()
     command=[sys.executable,str(ROOT/'collection_worker.py'),url,scope,str(model_path or ROOT/'data'/'model-service.json'),encode(rules or [])]
@@ -50,11 +54,11 @@ def collect_site(url,log,stop_event,scope="all",model_path=None,rules=None):
             for line in process.stdout: messages.put(line)
         finally: messages.put(None)
     threading.Thread(target=read_output,daemon=True).start()
-    deadline=time.monotonic()+600
+    limit=SITE_HARD_TIMEOUT.get(scope,SITE_HARD_TIMEOUT['all']);deadline=time.monotonic()+limit
     try:
         while True:
             if stop_event.is_set(): raise CollectionCancelled()
-            if time.monotonic()>deadline: raise ValueError('单站 Agent 超过 10 分钟，已停止；可稍后单独继续')
+            if time.monotonic()>deadline: raise ValueError('单站 Agent 超过 '+str(limit//60)+' 分钟，已停止；可稍后单独继续')
             try: line=messages.get(timeout=.1)
             except queue.Empty: continue
             if line is None: raise ValueError('采集进程意外结束，请查看该网站后重试')
@@ -63,6 +67,7 @@ def collect_site(url,log,stop_event,scope="all",model_path=None,rules=None):
             if message.get('kind')=='log': log(message['message'])
             elif message.get('kind')=='result': return message['data']
             elif message.get('kind')=='error':
+                if message.get('runtime'): raise BatchRuntimeError(message['message'])
                 if message.get('fatal'): raise AgentServiceError(message['message'],message.get('partial'))
                 if message.get('model_transient'): raise ModelTransientSiteError(message['message'],message.get('partial'))
                 raise ValueError(message['message'])
@@ -319,6 +324,11 @@ class Store:
                         self.job['done']+=1
                     model_failures=0
                 except CollectionCancelled: break
+                except BatchRuntimeError as e:
+                    if self.stop_event.is_set(): break
+                    self.job.update(status='failed',error=str(e),stage='浏览器运行环境异常，批次已停止')
+                    self.event('批次因浏览器运行环境异常停止：'+str(e)[:500],mode=mode)
+                    break
                 except ModelTransientSiteError as e:
                     with self.lock:
                         if self.stop_event.is_set(): break
@@ -425,7 +435,7 @@ class Handler(BaseHTTPRequestHandler):
                 sid=int(params.get('id',['0'])[0]); row=store.get(sid)
                 with store.connect() as db: saved=db.execute('SELECT * FROM drafts WHERE supplier_id=?',(sid,)).fetchone()
                 return self.send(make_draft(row,saved['subject'] if saved else None,saved['body'] if saved else None,store.draft_recipient(sid)),ctype='message/rfc822',filename='inquiry-'+str(sid)+'.eml')
-            name={'/':'index.html','/app.js':'app.js','/admin.js':'admin.js','/workspace.js':'workspace.js','/workspace.css':'workspace.css','/style.css':'style.css','/favicon.svg':'favicon.svg'}.get(path)
+            name={'/':'index.html','/app.js':'app.js','/admin.js':'admin.js','/workspace.js':'workspace.js','/workspace.css':'workspace.css','/style.css':'style.css','/favicon.svg':'favicon.svg','/vendor/qrcode.js':'vendor/qrcode.js'}.get(path)
             if name:
                 mime={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'}[Path(name).suffix]
                 return self.send((ROOT/'static'/name).read_bytes(),ctype=mime)

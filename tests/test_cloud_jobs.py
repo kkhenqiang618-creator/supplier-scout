@@ -7,6 +7,9 @@ from unittest.mock import MagicMock,patch
 
 @unittest.skipUnless(importlib.util.find_spec('psycopg') and importlib.util.find_spec('cryptography'),'cloud adapter dependencies are optional locally')
 class CloudJobResilienceTests(unittest.TestCase):
+    def setUp(self):
+        import cloud_worker
+        patcher=patch.object(cloud_worker,'self_check',return_value=None);patcher.start();self.addCleanup(patcher.stop)  # Egress probes are covered in test_cloud_selfcheck.
     def worker_store(self,count):
         store=MagicMock();rows={i:{'id':i,'url':'https://s'+str(i)+'.example.com','name':'s'+str(i)} for i in range(1,count+1)};store.get.side_effect=rows.__getitem__
         store.writes=[]

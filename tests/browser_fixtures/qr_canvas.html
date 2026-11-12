@@ -1,0 +1,7 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>墨子API</title></head>
+<body><h1>墨子API 大模型聚合平台</h1><p>覆盖主流闭源与开源模型，价格透明，充值后即时到账。</p>
+<div class="contact"><p>商务合作 扫码联系客服</p><img id="src" src="/contact-qr.png" alt="" style="display:none"><canvas id="qr" width="180" height="180"></canvas></div>
+<script>
+const img=document.getElementById('src');const draw=()=>{const c=document.getElementById('qr').getContext('2d');c.fillStyle='#fff';c.fillRect(0,0,180,180);c.drawImage(img,10,10,160,160);img.remove()};
+img.complete&&img.naturalWidth?draw():img.addEventListener('load',draw);
+</script></body></html>

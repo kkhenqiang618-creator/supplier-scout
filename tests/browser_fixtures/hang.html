@@ -1,0 +1,6 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>卡死测试</title></head>
+<body><h1>卡死测试页</h1><p>点击按钮后页面脚本进入死循环，用于验证快照超时。商务邮箱：hang@fixture-test.com</p>
+<button id="freeze" type="button">查看公告</button>
+<script>
+document.getElementById('freeze').addEventListener('click',()=>{setTimeout(()=>{for(;;){}},50)});
+</script></body></html>

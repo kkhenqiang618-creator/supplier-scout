@@ -1,0 +1,10 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Loading...</title>
+<style>#splash{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#fff;animation:fade .3s ease-out forwards}@keyframes fade{from{opacity:1}to{opacity:0}}</style></head>
+<body><div id="splash">Loading...</div><div id="app"></div>
+<script>
+// Mounts only after the splash's CSS animation ends: Moli 1.1.23 never fires animationend, headless Chrome does.
+document.getElementById('splash').addEventListener('animationend',()=>{
+ document.getElementById('splash').remove();document.title='启明API';
+ document.getElementById('app').innerHTML='<h1>启明API · 大模型中转平台</h1><p>提供 DeepSeek、GPT 系列模型的稳定中转服务，按量计费，企业客户可申请专属分组与发票。</p><section><h2>为什么选择我们</h2><p>多线路容灾，平均延迟低于 300ms，7×24 小时技术支持。</p></section><footer><p>商务合作邮箱：bizdev@qiming-fixture.com</p><p>商务微信：qiming_biz_2026</p><p><a href="https://t.me/qiming_fixture_biz">Telegram 商务频道</a></p></footer>';
+});
+</script></body></html>

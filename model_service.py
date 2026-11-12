@@ -19,10 +19,24 @@ class ModelConfigError(ValueError):
     """Fatal for a batch: credentials, URL, model name or redirect must be fixed by the user."""
 class ModelTransientError(ValueError):
     """Provider/network failure that ends one site, not the batch; .retry_after seconds (or None), .empty for a blank reply (retried once, then ModelConfigError), .retryable False for oversized/rejected page prompts."""
-    def __init__(self,message,retry_after=None,empty=False,retryable=True):super().__init__(message);self.retry_after=retry_after;self.empty=empty;self.retryable=retryable
+    def __init__(self,message,retry_after=None,empty=False,retryable=True,phase=None):super().__init__(message);self.retry_after=retry_after;self.empty=empty;self.retryable=retryable;self.phase=phase
 
 PAGE_REJECTED=re.compile(r'context[ _-]?length|context window|maximum context|too many tokens|token limit|max_tokens|prompt is too long|input is too long|content[ _-]?(policy|filter|management)|moderation|safety|sensitive|敏感|违规|上下文|长度超',re.I)
 RETRY_DELAYS=[2,6];RETRY_AFTER_CAP=30;RETRY_WAIT_CAP=40  # Total sleep stays bounded; the parent stop path kills the worker process group.
+REQUEST_TIMEOUT=45
+NETWORK_PHASES={'request','connect','tls'}  # Failed before the model saw the request: one retry, then report the egress problem.
+PHASE_TEXT={'request':'连接或上传请求超时（云端网络出口问题，不是模型响应慢）','response':'等待模型响应超时','tls':'TLS 握手失败或超时'}
+
+def failure_phase(error):
+    """urllib wraps everything raised inside h.request() (connect, TLS, sending the body) in URLError; getresponse/read errors surface bare."""
+    if isinstance(error,urllib.error.URLError) and not isinstance(error,urllib.error.HTTPError):
+        reason=error.reason
+        if isinstance(reason,ssl.SSLError) or (isinstance(reason,(socket.timeout,TimeoutError)) and 'handshake' in str(reason).lower()):return 'tls',str(reason)
+        if isinstance(reason,(socket.timeout,TimeoutError)):return 'request',str(reason)
+        return 'connect',None
+    if isinstance(error,ssl.SSLError):return ('tls' if 'handshake' in str(error).lower() else 'response'),str(error)  # Bare SSL errors after the handshake (peer dropped mid-reply) keep the full retry policy.
+    if isinstance(error,(socket.timeout,TimeoutError)):return 'response',str(error)
+    return None,None
 
 def retry_after(headers):
     try:value=float((headers or {}).get('Retry-After') or '')
@@ -107,7 +121,8 @@ class ModelService:
             try:return self._complete_once(messages,config)
             except ModelTransientError as error:
                 if error.empty and (attempt>=1 or attempt+1>=attempts):raise ModelConfigError(str(error)) from error  # Blank twice: reasoning/output parameters, not an outage.
-                if attempt+1>=attempts or not error.retryable or waited>=RETRY_WAIT_CAP:raise
+                limit=min(attempts,2) if getattr(error,'phase',None) in NETWORK_PHASES else attempts
+                if attempt+1>=limit or not error.retryable or waited>=RETRY_WAIT_CAP:raise
                 delay=error.retry_after if error.retry_after is not None else RETRY_DELAYS[min(attempt,len(RETRY_DELAYS)-1)]*random.uniform(.8,1.2)
                 delay=min(delay,RETRY_WAIT_CAP-waited);waited+=delay;time.sleep(delay)
     def _complete_once(self,messages,config=None):
@@ -120,13 +135,13 @@ class ModelService:
         request=urllib.request.Request(endpoint,data=json.dumps({'model':data['model'],'messages':messages}).encode(),headers=headers)
         empty=False
         try:
-            with urllib.request.build_opener(NoRedirect()).open(request,timeout=45) as response:
+            with urllib.request.build_opener(NoRedirect()).open(request,timeout=REQUEST_TIMEOUT) as response:
                 try:result=json.load(response);content=result['choices'][0]['message'].get('content')
                 except (ValueError,KeyError,IndexError,TypeError,AttributeError):raise ConnectionError('模型返回内容不是有效的 JSON 响应')
             if not isinstance(content,str) or not content.strip():empty=True;raise ValueError('模型返回空正文，需检查推理与输出参数')
             return content
         except Exception as error:
-            message=str(error);kind=ModelTransientError if empty else ModelConfigError;wait=None;retryable=True
+            message=str(error);kind=ModelTransientError if empty else ModelConfigError;wait=None;retryable=True;phase=None
             if isinstance(error,urllib.error.HTTPError):
                 raw=error.read(8192).decode('utf-8',errors='replace')
                 try:
@@ -139,9 +154,11 @@ class ModelService:
                 elif error.code==404:message+='。请核对 API URL，通常以 /v1 结尾'
                 if 'No available accounts' not in detail and (error.code in [408,409,425,429] or error.code>=500):kind=ModelTransientError;wait=retry_after(error.headers)
                 elif error.code==413 or (error.code in [400,422] and PAGE_REJECTED.search(detail or '')):kind=ModelTransientError;retryable=False  # This page's prompt is too large or rejected; end the site, keep the batch.
-            elif isinstance(error,(socket.timeout,TimeoutError,ssl.SSLError,urllib.error.URLError,OSError,ConnectionError)) or type(error).__module__=='http.client':kind=ModelTransientError
+            elif isinstance(error,(socket.timeout,TimeoutError,ssl.SSLError,urllib.error.URLError,OSError,ConnectionError)) or type(error).__module__=='http.client':
+                kind=ModelTransientError;phase,reason=failure_phase(error)
+                if phase in PHASE_TEXT:message=PHASE_TEXT[phase]+('：'+reason[:120] if reason else '')
             if data.get('api_key'):message=message.replace(data['api_key'],'[密钥已隐藏]')
-            if kind is ModelTransientError:raise ModelTransientError('模型服务调用失败：'+message[:300],wait,empty,retryable)
+            if kind is ModelTransientError:raise ModelTransientError('模型服务调用失败：'+message[:300],wait,empty,retryable,phase)
             raise ModelConfigError('模型服务调用失败：'+message[:300])
     def test(self):
         config=self.read()
