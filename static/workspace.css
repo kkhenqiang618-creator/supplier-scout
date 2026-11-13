@@ -6,3 +6,8 @@
 @media(prefers-reduced-motion:reduce){.ws-bin i{transition:none}}
 @media(max-width:680px){.page-title,.page-actions{min-width:0}.page-title .page-actions{max-width:100%;flex-wrap:wrap}#topbar{height:auto;min-height:68px}#topbar .top-actions{flex-wrap:wrap;justify-content:flex-end}}
 .ws-line-chart text{stroke:none}.ws-line-chart{stroke:none}
+.ws-insights-filters .ws-field select{width:100%;border:1px solid var(--border2);border-radius:7px;padding:8px 10px;font-size:13px;font-family:inherit;color:var(--ink);background:rgba(255,255,255,.85);appearance:auto}
+.ws-bin-target i{background:linear-gradient(180deg,#3B82F6,#2563EB)!important;box-shadow:0 0 12px rgba(37,99,235,.35)}
+.ws-bin-target label{color:#2563EB!important;font-weight:700;border-top-color:#BFDBFE!important}
+.ws-bin-target>span{color:#1D4ED8!important;font-weight:600}
+#ws-target-ratio:focus{outline:2px solid rgba(37,99,235,.4);border-color:var(--accent)!important}

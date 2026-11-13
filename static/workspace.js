@@ -62,6 +62,8 @@
  pages.contacts='联系与复核';pages.followup='后续处理';pages.review='联系与复核';
  let pricingData=null,pricingLoading=false,pricingError='',pricingRequest=0,pricingOwner='',pricingStamp='';
  let quoteFilter={model:'',resource:'',currency:'',unit:'',group:'',price:'input_price',supplier:''};
+ let committedFilter={model:'',resource:'',currency:'',unit:'',group:'',price:'input_price',supplier:''};
+ let myTargetRatio='',committedTargetRatio='';
  let logSearch='',logDate='',logType='all',draftSkipped=false,followSearch='';
  const originalRender=renderApp,originalNav=renderNav,originalDraft=openDraft,originalSaveDraft=saveDraft;
  const owner=()=>`${state?.username||'local'}:${mode}`;
@@ -109,7 +111,7 @@
  }
  openDraft=function(id){originalDraft(id);const r=state.suppliers.find(r=>r.id===id);if(!r)return;const emails=mailList(r);if(!emails.length)return;const saved=state.drafts.find(d=>d.supplier_id===id);const input=$('#modal .dialog-body .field input');if(input){input.outerHTML=`<select id="ws-draft-recipient">${emails.map(v=>`<option value="${esc(v)}" ${saved?.recipient===v?'selected':''}>${esc(v)}</option>`).join('')}</select>`;}if(!identity(r).name&&!saved){$('#draft-body').value=$('#draft-body').value.replace(`您好，${r.name}团队：`,'您好：');}};
  saveDraft=async function(id,download){const recipient=$('#ws-draft-recipient')?.value;if(!recipient)return originalSaveDraft(id,download);try{await api('drafts',{id,subject:$('#draft-subject').value,body:$('#draft-body').value,recipient});await load();if(download){const a=document.createElement('a');a.href='/api/draft?id='+id;a.download='inquiry-'+id+'.eml';document.body.append(a);a.click();a.remove();}toast(download?'草稿已保存并下载，邮件未发送':'草稿已保存，邮件未发送');}catch(e){$('#draft-error').textContent=e.message;}};
- function resetPricing(){pricingRequest++;pricingData=null;pricingError='';pricingLoading=false;pricingOwner=owner();quoteFilter={model:'',resource:'',currency:'',unit:'',group:'',price:'input_price',supplier:''};}
+ function resetPricing(){pricingRequest++;pricingData=null;pricingError='';pricingLoading=false;pricingOwner=owner();quoteFilter={model:'',resource:'',currency:'',unit:'',group:'',price:'input_price',supplier:''};committedFilter={model:'',resource:'',currency:'',unit:'',group:'',price:'input_price',supplier:''};myTargetRatio='';committedTargetRatio='';}
  async function loadPricing(){
   if(pricingLoading)return;pricingLoading=true;pricingError='';const request=++pricingRequest,key=owner(),stamp=pricingFingerprint();
   try{const data=await api('pricing?mode='+encodeURIComponent(mode));if(request!==pricingRequest||key!==owner())return;pricingData=data;pricingStamp=stamp;}
@@ -118,16 +120,18 @@
  }
  function selectHTML(id,label,options,value){return `<label class="ws-field">${label}<select id="${id}">${options.map(([k,v])=>`<option value="${esc(k)}" ${String(value)===String(k)?'selected':''}>${esc(v)}</option>`).join('')}</select></label>`;}
  function quoteOptions(data){return (data.suppliers||[]).flatMap(r=>r.offers||[]).filter(o=>matchesModel(o,quoteFilter.model));}
+ function parseTargetRatio(s){if(!s)return null;const v=parseFloat(s);if(!isFinite(v)||v<0)return null;return v>1?v/10:v;}
  function normalizeFilters(data){
   const ms=models(data);if(!ms.some(m=>m.value===quoteFilter.model))quoteFilter.model=ms[0]?.value||'';
   const offers=quoteOptions(data);for(const [key,get,empty]of [['currency',o=>o.currency||'未说明','未说明'],['unit',o=>o.unit||'未说明','未说明'],['group',o=>o.group||'未说明','未说明']]){const values=[...new Set(offers.map(get))];if(!values.includes(quoteFilter[key]))quoteFilter[key]=values[0]||empty;}
   const forms=[...new Set(offers.map(o=>resource(o.resource_form||o.resource_type)))];if(!quoteFilter.resource)quoteFilter.resource=forms[0]||'unknown';
   const suppliers=data.suppliers||[];if(!suppliers.some(r=>String(r.id)===String(quoteFilter.supplier)))quoteFilter.supplier=String(suppliers[0]?.id||'');
+  if(!committedFilter.model)committedFilter={...quoteFilter};
  }
  function trendHTML(data){
-  const supplier=(data.suppliers||[]).find(r=>String(r.id)===String(quoteFilter.supplier));
+  const supplier=(data.suppliers||[]).find(r=>String(r.id)===String(committedFilter.supplier));
   if(!supplier)return '<div class="empty">暂无供应商历史记录。</div>';
-  const entries=(data.history||[]).filter(h=>h.supplier_id===supplier.id).map(h=>{const matchingOffers=(h.offers||[]).filter(o=>matching(o,quoteFilter));const values=[...new Set(matchingOffers.map(o=>o[quoteFilter.price]).filter(v=>typeof v==='number'&&Number.isFinite(v)&&v>=0))];return {date:Date.parse(h.created_at),value:values.length===1?values[0]:null};}).filter(h=>Number.isFinite(h.date)).sort((a,b)=>a.date-b.date).slice(-40);
+  const entries=(data.history||[]).filter(h=>h.supplier_id===supplier.id).map(h=>{const matchingOffers=(h.offers||[]).filter(o=>matching(o,committedFilter));const values=[...new Set(matchingOffers.map(o=>o[committedFilter.price]).filter(v=>typeof v==='number'&&Number.isFinite(v)&&v>=0))];return {date:Date.parse(h.created_at),value:values.length===1?values[0]:null};}).filter(h=>Number.isFinite(h.date)).sort((a,b)=>a.date-b.date).slice(-40);
   const points=entries.filter(p=>p.value!=null);if(!points.length)return '<div class="empty">当前筛选下暂无同口径历史单价；未识别的数值不补画。</div>';
   const lo=Math.min(...points.map(p=>p.value)),hi=Math.max(...points.map(p=>p.value)),pad=(hi-lo)*.2||Math.max(hi*.1,1),min=Math.max(0,lo-pad),max=hi+pad;
   const first=entries[0].date,last=entries.at(-1).date;const x=p=>55+(last===first?260:(p.date-first)/(last-first)*500),y=p=>140-(p.value-min)/(max-min)*105;
@@ -138,13 +142,13 @@
  function insightsPage(){
   const title=heading('报价洞察','查看同口径折扣分布与真实历史变化。',`<button class="btn" data-ws-pricing-refresh>${I('refresh')}刷新报价</button>`,'PRICING INTELLIGENCE')+notice();
   if(!pricingData){if(!pricingLoading&&!pricingError)void loadPricing();return title+`<div class="panel empty" role="status">${pricingError?`报价加载失败：${esc(pricingError)}<br><button class="btn small" data-ws-pricing-refresh>重试</button>`:'正在加载完整报价与历史…'}</div>`;}
-  normalizeFilters(pricingData);const data=pricingData,offers=quoteOptions(data),unique=(key)=>[...new Set(offers.map(o=>o[key]||'未说明'))].map(v=>[v,v]);
-  const selector=selectHTML('ws-model','模型',models(data).map(m=>[m.value,m.label]),quoteFilter.model)+selectHTML('ws-price','计价项',[['input_price','输入单价'],['output_price','输出单价'],['cache_price','缓存读取单价']],quoteFilter.price)+selectHTML('ws-resource','统一折扣 · 资源类型',[['key','官 key'],['self','自部署/运营商'],['official','官转聚合'],['unknown','待确认']],quoteFilter.resource)+selectHTML('ws-currency','币种',unique('currency'),quoteFilter.currency)+selectHTML('ws-unit','计价单位',unique('unit'),quoteFilter.unit)+selectHTML('ws-group','报价分组',unique('group'),quoteFilter.group);
-  const selectedRule=data.rules.find(r=>matchesModel({model:r.model},quoteFilter.model));
-  const baseKnown=selectedRule?.currency===quoteFilter.currency&&selectedRule?.unit===quoteFilter.unit;
-  const refs=[['目录价：输入单价','reference_input'],['目录价：输出单价','reference_output'],['目录价：缓存读取','reference_cache']].map(([label,key])=>`<div><span>${label}</span><strong>${baseKnown&&Number.isFinite(selectedRule[key])?esc(selectedRule[key])+' '+esc(quoteFilter.currency):'待确认'}</strong></div>`).join('');
-  const result=distribution(data,quoteFilter),max=Math.max(1,...result.bins),names=['＜3 折','3–4 折','4–5 折','5–6 折','≥6 折'];
-  return title+shortProgress()+`<div class="ws-quote-filters">${selector}</div><div class="ws-reference">${refs}</div>`+panel('折扣区间分布',`<div class="ws-chart-context">${esc(models(data).find(m=>m.value===quoteFilter.model)?.label||'暂无模型')} · ${esc(({self:'自部署/运营商',key:'官 key',official:'官转聚合',unknown:'待确认'})[quoteFilter.resource])} · ${esc(quoteFilter.currency)} / ${esc(quoteFilter.unit)}</div><div class="ws-chart-summary"><strong>${result.comparable}</strong> 家可比供应商 <span>${result.unknown} 家待核对 · 未计入分布</span></div>${result.comparable?`<div class="ws-histogram" role="img" aria-label="折扣区间供应商家数：${names.map((n,i)=>n+result.bins[i]+'家').join('；')}">${names.map((name,i)=>`<div class="ws-bin"><span>${result.bins[i]} 家<small>${Math.round(result.bins[i]/result.comparable*100)}%</small></span><i style="height:${result.bins[i]/max*150}px"></i><label>${name}</label></div>`).join('')}</div>`:'<div class="empty">当前口径暂无可核实的折扣数据。缺少基准或条件不清的报价保留为待核对。</div>'}<details class="ws-definition"><summary>完整字段与统计口径</summary><p>每家供应商取当前模型、币种、单位、资源类型及分组下的报价；冲突或缺依据的记录不自动选低价。3 折计入 3–4 折，6 折计入 ≥6 折。</p><p>目录价、输入/输出/缓存单价、分组倍率、资源类型、适用条件、报价来源与证据分别保留；充值优惠和分组倍率不冒充目录价折扣。统计使用完整报价，列表摘要不参与计算。</p><div class="table-scroll"><table><thead><tr><th>编号 / 网站</th><th>实际模型</th><th>输入 / 输出 / 缓存</th><th>分组 / 倍率</th><th>来源与条件</th></tr></thead><tbody>${data.suppliers.flatMap(r=>(r.offers||[]).filter(o=>matching(o,quoteFilter)).map(o=>`<tr><td>${site(r)}</td><td>${esc(o.model_name||o.model)}</td><td>${[o.input_price,o.output_price,o.cache_price].map(v=>v==null?'—':esc(v)).join(' / ')}<small class="ws-muted">${esc(o.currency||'未说明')} / ${esc(o.unit||'未说明')}</small></td><td>${esc(o.group||'未说明')} / ${o.group_multiplier==null?'待确认':'×'+esc(o.group_multiplier)}</td><td>${o.source?`<a href="${safeLink(o.source)}" target="_blank" rel="noopener noreferrer">报价来源</a>`:'来源待确认'}<p class="ws-note">${esc(o.notes||o.price_text||o.reason||'条件待确认')}</p></td></tr>`)).join('')||'<tr><td colspan="5">暂无同口径报价</td></tr>'}</tbody></table></div></details>`)+panel('历史价格变化',`<div class="ws-trend-picker">${selectHTML('ws-trend-supplier','供应商',(data.suppliers||[]).map(r=>[r.id,identity(r).host]),quoteFilter.supplier)}</div>${trendHTML(data)}`);
+  normalizeFilters(pricingData);const data=pricingData;
+  const targetInput=`<label class="ws-field">折扣<div style="display:flex;gap:8px;align-items:center;width:fit-content"><input id="ws-target-ratio" type="number" min="0" max="10" step="0.01" placeholder="例：3.5" value="${esc(myTargetRatio)}" style="width:120px;border:1px solid var(--border2);border-radius:7px;padding:8px 10px;font-size:13px;font-family:inherit;color:var(--ink);background:rgba(255,255,255,.85)"></div></label>`;
+  const queryBtn=`<div class="ws-field" style="justify-content:flex-end"><button class="btn primary" data-ws-insights-query style="height:38px;padding:0 20px;white-space:nowrap">查询</button></div>`;
+  const selector=selectHTML('ws-model','模型',models(data).map(m=>[m.value,m.label]),quoteFilter.model)+targetInput+selectHTML('ws-resource','资源类型',[['key','官 key'],['self','自部署/运营商'],['official','官转聚合'],['unknown','待确认']],quoteFilter.resource)+queryBtn;
+  const cf=committedFilter,ctr=committedTargetRatio;
+  const result=distribution(data,cf),max=Math.max(1,...result.bins),names=['＜3 折','3–4 折','4–5 折','5–6 折','≥6 折'];
+  return title+shortProgress()+`<div class="ws-insights-filters" style="display:grid;grid-template-columns:200px 120px 200px 120px;gap:16px;margin:0 0 22px;align-items:end">${selector}</div>`+panel('折扣区间分布',`<div class="ws-chart-context">${esc(models(data).find(m=>m.value===cf.model)?.label||'暂无模型')} · ${esc(({self:'自部署/运营商',key:'官 key',official:'官转聚合',unknown:'待确认'})[cf.resource])} · ${esc(cf.currency)} / ${esc(cf.unit)}</div><div class="ws-chart-summary"><strong>${result.comparable}</strong> 家可比供应商 <span>${result.unknown} 家待核对 · 未计入分布</span></div>${result.comparable?`<div class="ws-histogram" role="img" aria-label="折扣区间供应商家数：${names.map((n,i)=>n+result.bins[i]+'家').join('；')}">${names.map((name,i)=>{const tr=parseTargetRatio(ctr);const lo=[0,.3,.4,.5,.6][i],hi=[.3,.4,.5,.6,Infinity][i];const isTarget=tr!=null&&tr>=lo&&tr<hi;return `<div class="ws-bin"${isTarget?' ws-bin-target':''}><span>${result.bins[i]} 家<small>${Math.round(result.bins[i]/result.comparable*100)}%</small></span><i style="height:${result.bins[i]/max*150}px"></i><label>${name}</label></div>`;}).join('')}</div>`:'<div class="empty">当前口径暂无可核实的折扣数据。缺少基准或条件不清的报价保留为待核对。</div>'}<details class="ws-definition"><summary>完整字段与统计口径</summary><p>每家供应商取当前模型、币种、单位、资源类型及分组下的报价；冲突或缺依据的记录不自动选低价。3 折计入 3–4 折，6 折计入 ≥6 折。</p><p>目录价、输入/输出/缓存单价、分组倍率、资源类型、适用条件、报价来源与证据分别保留；充值优惠和分组倍率不冒充目录价折扣。统计使用完整报价，列表摘要不参与计算。</p><div class="table-scroll"><table><thead><tr><th>编号 / 网站</th><th>实际模型</th><th>输入 / 输出 / 缓存</th><th>分组 / 倍率</th><th>来源与条件</th></tr></thead><tbody>${data.suppliers.flatMap(r=>(r.offers||[]).filter(o=>matching(o,cf)).map(o=>`<tr><td>${site(r)}</td><td>${esc(o.model_name||o.model)}</td><td>${[o.input_price,o.output_price,o.cache_price].map(v=>v==null?'—':esc(v)).join(' / ')}<small class="ws-muted">${esc(o.currency||'未说明')} / ${esc(o.unit||'未说明')}</small></td><td>${esc(o.group||'未说明')} / ${o.group_multiplier==null?'待确认':'×'+esc(o.group_multiplier)}</td><td>${o.source?`<a href="${safeLink(o.source)}" target="_blank" rel="noopener noreferrer">报价来源</a>`:'来源待确认'}<p class="ws-note">${esc(o.notes||o.price_text||o.reason||'条件待确认')}</p></td></tr>`)).join('')||'<tr><td colspan="5">暂无同口径报价</td></tr>'}</tbody></table></div></details>`)+panel('历史价格变化',`<div class="ws-trend-picker">${selectHTML('ws-trend-supplier','供应商',(data.suppliers||[]).map(r=>[r.id,identity(r).host]),cf.supplier)}</div>${trendHTML(data)}`);
  }
  function logsPage(){
   const events=state.events.filter(e=>e.mode===mode&&(!logSearch||`${e.message} ${state.suppliers.find(r=>r.id===e.supplier_id)?.url||''}`.toLowerCase().includes(logSearch.toLowerCase()))&&(!logDate||String(e.created_at).slice(0,10)===logDate)&&(logType==='all'||/失败|异常|受阻|失联|错误/.test(e.message)));
@@ -155,6 +159,7 @@
  renderApp=function(){
   if(!state)return;if(pricingOwner!==owner())resetPricing();
   if(page==='insights'&&pricingData&&pricingStamp!==pricingFingerprint()){pricingData=null;pricingError='';}
+  if(page==='insights'){const aid=document.activeElement?.id;if(['ws-target-ratio','ws-model','ws-resource'].includes(aid))return;}
   if(page==='review'){page='contacts';filter='all';}
   const renderers={dashboard,suppliers,contacts:contactsPage,followup:followupPage,drafts:draftsPage,insights:insightsPage,logs:logsPage};
   if(!renderers[page])return originalRender();renderNav();$('#main').innerHTML=renderers[page]();lastBusy=state.job.running;
@@ -170,18 +175,21 @@
   if(b.dataset.wsHistory)return openFollowup(Number(b.dataset.wsHistory),true);
   if(b.dataset.wsReview)return openReview(Number(b.dataset.wsReview));
   if(b.hasAttribute('data-ws-pricing-refresh')){pricingData=null;pricingError='';void loadPricing();return renderApp();}
+  if(b.hasAttribute('data-ws-insights-query')){committedFilter={...quoteFilter};committedTargetRatio=myTargetRatio;renderApp();return;}
   if(b.dataset.wsSaveFollow){b.disabled=true;const username=state.username;try{await api('followup',{id:Number(b.dataset.wsSaveFollow),status:$('#ws-follow-status').value,note:$('#ws-follow-note').value});if(state.username!==username)return;$('#modal').close();page='followup';filter='all';pageNo=1;await load();toast('联系记录已保存，已进入后续处理');}catch(err){const box=$('#ws-follow-error');if(box)box.textContent=err.message;}finally{b.disabled=false;}return;}
   if(b.dataset.wsSaveReview){b.disabled=true;try{await api('review',{id:Number(b.dataset.wsSaveReview),status:$('#review-status').value,note:$('#review-note').value});$('#modal').close();await load();toast('复核结果已保存，联系进度保持独立');}catch(err){$('#review-error').textContent=err.message;}finally{b.disabled=false;}return;}
  });
  document.addEventListener('change',e=>{
-  const mapping={'ws-model':'model','ws-price':'price','ws-resource':'resource','ws-currency':'currency','ws-unit':'unit','ws-group':'group','ws-trend-supplier':'supplier'};
-  if(mapping[e.target.id]){quoteFilter[mapping[e.target.id]]=e.target.value;if(e.target.id==='ws-model'){quoteFilter.resource='';quoteFilter.currency='';quoteFilter.unit='';quoteFilter.group='';}renderApp();}
+  if(e.target.id==='ws-model'){quoteFilter.model=e.target.value;quoteFilter.resource='';return;}
+  if(e.target.id==='ws-resource'){quoteFilter.resource=e.target.value;return;}
+  if(e.target.id==='ws-trend-supplier'){quoteFilter.supplier=e.target.value;committedFilter.supplier=e.target.value;renderApp();return;}
   if(e.target.id==='ws-supplier-status'){filter=e.target.value;pageNo=1;renderApp();}
   if(e.target.id==='ws-draft-skipped'){draftSkipped=e.target.checked;renderApp();}
   if(e.target.id==='ws-log-date'){logDate=e.target.value;pageNo=1;renderApp();}
   if(e.target.id==='ws-log-type'){logType=e.target.value;pageNo=1;renderApp();}
  });
  document.addEventListener('input',e=>{
+  if(e.target.id==='ws-target-ratio'){myTargetRatio=e.target.value;return;}
   const id=e.target.id;if(!['ws-supplier-search','ws-contact-search','ws-follow-search','ws-log-search'].includes(id))return;
   const value=e.target.value,pos=e.target.selectionStart;
   if(id==='ws-follow-search')followSearch=value;else if(id==='ws-log-search')logSearch=value;else search=value;pageNo=1;renderApp();const input=$('#'+id);input.focus();input.setSelectionRange(pos,pos);
