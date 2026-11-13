@@ -67,4 +67,16 @@ class CloudStoreTests(unittest.TestCase):
         state=self.store.state(full=False);row=next(row for row in state['suppliers'] if row['id']==self.row['id'])
         self.assertTrue(row['_summary']);self.assertEqual(row['sources'],[]);self.assertEqual(row['offer_count'],1);self.assertTrue(row['needs_price_review'])
 
+    def test_05_full_rerun_preserves_manual_decision_and_unique_sources(self):
+        store=self.store;sid=self.row['id']
+        source={'url':self.row['url'],'excerpt':'unique quote evidence'}
+        result={'offers':[{'model':'deepseek-v4.1','ratio':.3,'currency':'USD','unit':'1M tokens'}],'contacts':{},'sources':[source]}
+        store.save_result(sid,result);store.review(sid,'skipped','人工核实')
+        store.save_result(sid,dict(result,sources=[source,source]))
+        row=store.get(sid)
+        self.assertEqual((row['status'],row['reason'],row['notes']),('skipped','人工复核：人工核实','人工核实'))
+        self.assertEqual(sum(item==source for item in row['sources']),1)
+        store.save_result(sid,dict(result,offers=[dict(result['offers'][0],unit='1K tokens')]))
+        self.assertIn('报价已变化，建议重新复核',store.get(sid)['warnings'])
+
 if __name__=='__main__':unittest.main()

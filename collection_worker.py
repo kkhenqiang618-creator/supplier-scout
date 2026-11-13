@@ -1,6 +1,9 @@
 """Isolated autonomous agent worker. Parent can stop the full browser process group."""
 import json
 import sys
+# Parent attaches the Windows Job before any browser or model can start.
+if '--parent-gate' in sys.argv[5:] and sys.stdin.readline().strip()!='ready':
+    raise SystemExit('Collection parent did not authorize startup')
 from browser_agent import run_site,AgentServiceError,ModelTransientSiteError,BrowserRuntimeError
 
 def emit(value):print(json.dumps(value,ensure_ascii=False),flush=True)

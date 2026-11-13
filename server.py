@@ -46,43 +46,104 @@ class ModelTransientSiteError(ValueError):
 
 # Hard per-site cut-off; stays above browser_agent's soft deadline - reserve + worst step tail for each scope (see the budget comment there).
 SITE_HARD_TIMEOUT={'all':840,'contacts':480}
+def _terminate_tree(process,job=None):
+    """Bounded cleanup; always reap the worker, and signal its POSIX descendants."""
+    if process.pid<=0:raise ValueError('Invalid collection process id')
+    if os.name=='nt':
+        if job is not None:
+            job.close()
+            process.wait(timeout=.5)
+            return
+        if process.poll() is None:
+            subprocess.run(['taskkill','/T','/F','/PID',str(process.pid)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=2,check=True)
+        process.wait(timeout=.5)
+        return
+    try:os.killpg(process.pid,signal.SIGTERM)
+    except ProcessLookupError:pass
+    try:process.wait(timeout=.5)
+    except subprocess.TimeoutExpired:pass
+    # The parent may have exited while browser descendants still hold the group.
+    try:os.killpg(process.pid,signal.SIGKILL)
+    except ProcessLookupError:pass
+    process.wait(timeout=.5)
+
 def collect_site(url,log,stop_event,scope="all",model_path=None,rules=None):
     if stop_event.is_set(): raise CollectionCancelled()
     command=[sys.executable,str(ROOT/'collection_worker.py'),url,scope,str(model_path or ROOT/'data'/'model-service.json'),encode(rules or [])]
-    process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8',start_new_session=True)
+    options={'creationflags':subprocess.CREATE_NEW_PROCESS_GROUP,'stdin':subprocess.PIPE} if os.name=='nt' else {'start_new_session':True}
+    if os.name=='nt':command.append('--parent-gate')
+    process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8',**options)
+    job=None
+    if os.name=='nt':
+        try:
+            from windows_job import WindowsJob
+            job=WindowsJob(process)
+            process.stdin.write('ready\n');process.stdin.flush();process.stdin.close()
+        except Exception as error:
+            if job is not None:job.close()
+            if process.poll() is None:process.kill()
+            process.wait(timeout=1);process.stdin.close();process.stdout.close()
+            raise BatchRuntimeError('Windows采集进程保护初始化失败，批次未开始') from error
     messages=queue.Queue()
     def read_output():
         try:
             for line in process.stdout: messages.put(line)
-        finally: messages.put(None)
+        finally:
+            process.stdout.close()
+            messages.put(None)
     threading.Thread(target=read_output,daemon=True).start()
-    limit=SITE_HARD_TIMEOUT.get(scope,SITE_HARD_TIMEOUT['all']);deadline=time.monotonic()+limit
+    limit=SITE_HARD_TIMEOUT.get(scope,SITE_HARD_TIMEOUT['all']);deadline=time.monotonic()+limit;exited_at=None
     try:
         while True:
             if stop_event.is_set(): raise CollectionCancelled()
             if time.monotonic()>deadline: raise ValueError('单站 Agent 超过 '+str(limit//60)+' 分钟，已停止；可稍后单独继续')
             try: line=messages.get(timeout=.1)
-            except queue.Empty: continue
+            except queue.Empty:
+                if process.poll() is not None:
+                    if exited_at is None:exited_at=time.monotonic()
+                    elif time.monotonic()-exited_at>=.5:raise ValueError('采集进程意外结束，请查看该网站后重试')
+                continue
             if line is None: raise ValueError('采集进程意外结束，请查看该网站后重试')
             try: message=json.loads(line)
             except ValueError: continue
             if message.get('kind')=='log': log(message['message'])
-            elif message.get('kind')=='result': return message['data']
+            elif message.get('kind')=='result':
+                grace=time.monotonic()+2
+                while process.poll() is None and not stop_event.is_set():
+                    remaining=grace-time.monotonic()
+                    if remaining<=0:break
+                    try:process.wait(timeout=min(.05,remaining))
+                    except subprocess.TimeoutExpired:pass
+                return message['data']
             elif message.get('kind')=='error':
                 if message.get('runtime'): raise BatchRuntimeError(message['message'])
                 if message.get('fatal'): raise AgentServiceError(message['message'],message.get('partial'))
                 if message.get('model_transient'): raise ModelTransientSiteError(message['message'],message.get('partial'))
                 raise ValueError(message['message'])
     finally:
-        if process.poll() is None:
-            try: os.killpg(process.pid,signal.SIGTERM)
-            except ProcessLookupError: pass
-            try: process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                try: os.killpg(process.pid,signal.SIGKILL)
-                except ProcessLookupError: pass
-                process.wait()
-        process.stdout.close()
+        try:_terminate_tree(process,job)
+        except Exception as error:
+            # Cleanup cannot replace an already received result or the stop/timeout.
+            try:log('采集进程清理未完成：'+type(error).__name__)
+            except Exception:pass
+
+QUOTE_CHANGED_WARNING='报价已变化，建议重新复核'
+
+def manual_decision(row):
+    return str(row.get('reason') or '').startswith('人工复核：')
+
+def merge_sources(*groups):
+    merged=[];known=set()
+    for group in groups:
+        for item in group:
+            key=(item.get('url'),item.get('excerpt'))
+            if key not in known:merged.append(item);known.add(key)
+    return merged
+
+def quote_fingerprint(offers):
+    # Evidence refreshes and evaluation outcomes are not commercial changes.
+    fields=('model','model_name','ratio','input_price','output_price','cache_price','currency','unit','group','group_multiplier','resource_form','resource_type','price_text','notes','conditions')
+    return {json.dumps({key:offer[key] for key in fields if offer.get(key) is not None},sort_keys=True,ensure_ascii=False) for offer in offers}
 
 class Store:
     def __init__(self,path,seed=True):
@@ -220,18 +281,27 @@ class Store:
         self.event('导入 '+str(added)+' 家供应商，跳过 '+str(len(valid)-added)+' 条重复记录')
         return {'added':added,'duplicates':len(valid)-added}
     def save_result(self,sid,result):
-        row=self.get(sid); offers=[evaluate(o,self.rules()) for o in result.get('offers',[])]
-        contacts=result.get('contacts',{}); status='review'; reason='已读取网页，未发现明确折扣；请核对价格表或粘贴报价'
-        if not offers:
-            if any(contacts.values()): reason='已找到联系方式；页面暂无明确折扣，需核对价格表'
-            elif result.get('sources') and all(len(source.get('excerpt',''))<180 for source in result['sources']): reason='网页内容很少，可能需要浏览器加载或登录；请查看来源'
-        if offers:
-            best=min(offers,key=lambda o:{'qualified':0,'review':1,'skipped':2}[o['status']]); status=best['status']; reason=best['reason']
-        if status=='qualified' and not any(contacts.values()): status='review'; reason='价格符合区间，但缺少联系方式，待补查'
-        with self.lock,self.connect() as db:
-            db.execute('UPDATE suppliers SET status=?,reason=?,contacts=?,offers=?,sources=?,warnings=?,checked_at=? WHERE id=?',(status,reason,encode(contacts),encode(offers),encode(result.get('sources',[])),encode(result.get('warnings',[])),now(),sid))
-            if offers: db.execute('INSERT INTO history(supplier_id,mode,offers,created_at) VALUES(?,?,?,?)',(sid,row['mode'],encode(offers),now()))
-        self.event('完成分析：'+row['name']+' · '+reason,sid,row['mode'])
+        with self.lock:
+            row=self.get(sid); offers=[evaluate(o,self.rules()) for o in result.get('offers',[])]
+            contacts=result.get('contacts',{}); status='review'; reason='已读取网页，未发现明确折扣；请核对价格表或粘贴报价'
+            if not offers:
+                if any(contacts.values()): reason='已找到联系方式；页面暂无明确折扣，需核对价格表'
+                elif result.get('sources') and all(len(source.get('excerpt',''))<180 for source in result['sources']): reason='网页内容很少，可能需要浏览器加载或登录；请查看来源'
+            if offers:
+                best=min(offers,key=lambda o:{'qualified':0,'review':1,'skipped':2}[o['status']]); status=best['status']; reason=best['reason']
+            if status=='qualified' and not any(contacts.values()): status='review'; reason='价格符合区间，但缺少联系方式，待补查'
+            sources=merge_sources(row['sources'],result.get('sources',[]))
+            warnings=list(result.get('warnings',[]))
+            changed=manual_decision(row) and quote_fingerprint(row['offers'])!=quote_fingerprint(offers)
+            if manual_decision(row):
+                status,reason=row['status'],row['reason']
+                if changed or QUOTE_CHANGED_WARNING in row['warnings']:warnings.append(QUOTE_CHANGED_WARNING)
+            warnings=list(dict.fromkeys(warnings))
+            with self.connect() as db:
+                db.execute('UPDATE suppliers SET status=?,reason=?,contacts=?,offers=?,sources=?,warnings=?,checked_at=? WHERE id=?',(status,reason,encode(contacts),encode(offers),encode(sources),encode(warnings),now(),sid))
+                if offers: db.execute('INSERT INTO history(supplier_id,mode,offers,created_at) VALUES(?,?,?,?)',(sid,row['mode'],encode(offers),now()))
+            self.event('完成分析：'+row['name']+' · '+reason,sid,row['mode'])
+            if changed:self.event(QUOTE_CHANGED_WARNING,sid,row['mode'])
     def _entry_values(self,row,url,evidence,source_url,expected_url,method='manual'):
         target=validate_entry_url(url)
         if not isinstance(evidence,str) or not evidence.strip() or len(evidence)>3000:raise ValueError('请填写已核验新网址的依据（1–3000字）')
@@ -296,8 +366,9 @@ class Store:
             self.event('联系方式检查：'+row['name']+' · '+str(result.get('contact_summary') or current),sid,row['mode'])
     def review(self,sid,status,note):
         if status not in ['qualified','review','skipped'] or not str(note).strip(): raise ValueError('请选择结果并填写复核依据')
-        row=self.get(sid)
-        with self.lock,self.connect() as db: db.execute('UPDATE suppliers SET status=?,reason=?,notes=? WHERE id=?',(status,'人工复核：'+str(note).strip()[:1500],str(note).strip()[:1500],sid))
+        with self.lock:
+            row=self.get(sid)
+            with self.connect() as db: db.execute('UPDATE suppliers SET status=?,reason=?,notes=?,warnings=? WHERE id=?',(status,'人工复核：'+str(note).strip()[:1500],str(note).strip()[:1500],encode([warning for warning in row['warnings'] if warning!=QUOTE_CHANGED_WARNING]),sid))
         self.event('人工复核 '+row['name']+'：'+note[:1500],sid,row['mode'])
     def update_rules(self,rules):
         validate_rules(rules)
@@ -394,7 +465,7 @@ class Store:
                 except Exception as e:
                     with self.lock:
                         if self.stop_event.is_set(): break
-                        if scope=='all':
+                        if scope=='all' and not manual_decision(self.get(row['id'])):
                             with self.connect() as db: db.execute('UPDATE suppliers SET status="error",reason=?,checked_at=? WHERE id=?',(str(e)[:1500],now(),row['id']))
                         self.save_contacts(row['id'],{'contact_status':'blocked','contact_summary':str(e)[:500],'contacts':{},'sources':[],'warnings':[str(e)],'scope':scope})
                         self.event('采集失败 '+row['name']+'：'+str(e)[:500],row['id'],mode)

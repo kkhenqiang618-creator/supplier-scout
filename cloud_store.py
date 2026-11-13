@@ -14,7 +14,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from cryptography.fernet import Fernet
 from model_service import ModelService
-from server import Store, encode, now
+from server import Store, encode, now, merge_sources
 from rulebook import A_RULES
 
 WRITE_LOCK=732198461
@@ -152,11 +152,7 @@ class PostgresStore(Store):
                 for value in values:
                     if str(value).casefold() not in known:
                         contacts.setdefault(kind,[]).append(value);known.add(str(value).casefold())
-            sources=list(current['sources']);known={(item.get('url'),item.get('excerpt')) for item in sources}
-            for item in result.get('sources',[]):
-                key=(item.get('url'),item.get('excerpt'))
-                if key not in known:sources.append(item);known.add(key)
-            return Store.save_result(self,sid,dict(result,contacts=contacts,sources=sources))
+            return Store.save_result(self,sid,dict(result,contacts=contacts,sources=merge_sources(current['sources'],result.get('sources',[]))))
     def save_contacts(self,*args,**kwargs):return self._write(Store.save_contacts,*args,**kwargs)
     def update_entry(self,*args,**kwargs):return self._write(Store.update_entry,*args,**kwargs)
     def review(self,*args,**kwargs):return self._write(Store.review,*args,**kwargs)
