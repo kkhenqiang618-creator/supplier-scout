@@ -231,7 +231,6 @@ class PostgresStore(Store):
         total=int(row.get('total') or 0);done=int(row.get('position') or 0)
         progress='，已完成 %d/%d 家'%(done,total) if total else ''
         return '云端浏览器同一时间只执行一个批次：成员 '+name+'正在采集'+progress+'，请稍后重试或等该批次结束后继续'
-        return '云端浏览器同一时间只执行一个批次：'+who+'正在采集'+progress+'，请稍后重试或等该批次结束后继续'
     def _busy_message(self):
         """The insert collides with the global one-active-batch index, which RLS hides from the caller's pre-check."""
         try:
