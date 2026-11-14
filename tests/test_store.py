@@ -12,6 +12,11 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(result,{'added':1,'duplicates':1})
         with self.assertRaises(ValueError): self.store.import_rows([{'url':'https://valid.com'},{'url':'file:///etc/passwd'}])
         self.assertEqual(len(self.store.state()['suppliers']),1)
+    def test_contact_merge_ignores_case_keeps_first_spelling_and_order(self):
+        from server import merge_contacts
+        merged=merge_contacts({'email':['Sales@Example.com'],'wechat':['wx-1']},{'email':['sales@example.com','SUPPORT@example.com'],'phone':['123']})
+        self.assertEqual(merged['email'],['Sales@Example.com','SUPPORT@example.com'])
+        self.assertEqual(merged['wechat'],['wx-1']);self.assertEqual(merged['phone'],['123'])
     def test_310_domains_keep_numbers_without_supplier_names(self):
         rows=[{'source_row':str(i+2),'domain':str(i)+'.example.com'} for i in range(310)]
         self.assertEqual(self.store.import_rows(rows)['added'],310)

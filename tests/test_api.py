@@ -8,6 +8,7 @@ import unittest
 import urllib.error
 import urllib.request
 from server import create_server
+from support import requires_runtime
 from unittest.mock import patch
 
 class ApiTests(unittest.TestCase):
@@ -64,6 +65,15 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(self.call('/api/supplier-entry',dict(body,expected_url='https://new.example/',url='https://127.0.0.1/'))[0],400)
         self.assertEqual(self.call('/api/supplier-entry',body,origin='https://evil.example')[0],403)
 
+    def test_internal_errors_return_a_generic_message_and_keep_details_server_side(self):
+        import io,sys
+        captured=io.StringIO()
+        with patch.object(self.app.store,'update_rules',side_effect=RuntimeError('DATABASE_URL=secret')),patch.object(sys,'stderr',captured):
+            code,_,body=self.call('/api/rules',{'rules':{}})
+        self.assertEqual(code,500)
+        self.assertEqual(json.loads(body),{'error':'服务器内部错误，请稍后重试'})
+        self.assertNotIn('secret',body.decode('utf-8'))
+        self.assertIn('RuntimeError',captured.getvalue())
     def test_stop_endpoint_is_idempotent_when_idle(self):
         for _ in range(2):
             status,headers,body=self.call('/api/stop',{})
@@ -74,6 +84,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call('/api/run',{'mode':'demo'},origin='https://malicious.example')[0],403)
         self.assertEqual(self.call('/api/import',{'rows':[]})[0],400)
         self.assertEqual(self.call('/api/review',{'id':999,'status':'qualified','note':'核对'})[0],400)
+    @requires_runtime
     def test_private_network_target_marked_error_without_hanging_batch(self):
         self.app.store.model_service.save({'base_url':'https://example.com/v1','model':'fixture-model','api_key':'fixture-key'})
         self.call('/api/import',{'rows':[{'url':'http://127.0.0.1'}]})
@@ -82,6 +93,7 @@ class ApiTests(unittest.TestCase):
         while self.app.store.job['running'] and time.monotonic()<deadline: time.sleep(.01)
         row=self.app.store.state()['suppliers'][0]
         self.assertEqual(row['status'],'error'); self.assertIn('禁止访问',row['reason']); self.assertFalse(self.app.store.job['running'])
+    @requires_runtime
     def test_live_crawl_contract_with_local_html_fixture(self):
         # Network transport is replaced at its boundary; real parser, worker,
         # rules, persistence and HTTP handlers still run against fixture HTML.

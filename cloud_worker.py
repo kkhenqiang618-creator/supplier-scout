@@ -10,10 +10,7 @@ from psycopg.types.json import Jsonb
 from urllib.parse import urlsplit
 from cloud_store import PostgresStore, LostLease
 from model_service import ModelService, ModelConfigError, ModelTransientError, PHASE_TEXT, NETWORK_PHASES
-from server import collect_site, CollectionCancelled, AgentServiceError, BatchRuntimeError
-try:from server import ModelTransientSiteError
-except ImportError:
-    class ModelTransientSiteError(ValueError):partial=None
+from server import collect_site, CollectionCancelled, AgentServiceError, BatchRuntimeError, ModelTransientSiteError, merge_contacts
 
 MODEL_FAILURE_LIMIT=3
 HEARTBEAT_INTERVAL=5
@@ -138,9 +135,8 @@ def execute_job(store,job,owner,shutdown):
                 with store.fenced(job['id'],owner) as (db,current):
                     if current['cancel_requested'] or stop.is_set():raise CollectionCancelled()
                     if job['scope']=='all':
-                        prior=store.get(row['id']);merged={key:list(value) for key,value in prior['contacts'].items()}
-                        for kind,values in result.get('contacts',{}).items():merged[kind]=sorted(set(merged.get(kind,[])+values))
-                        store.save_result(row['id'],dict(result,contacts=merged,sources=prior['sources']+result.get('sources',[])))
+                        prior=store.get(row['id'])
+                        store.save_result(row['id'],dict(result,contacts=merge_contacts(prior['contacts'],result.get('contacts')),sources=prior['sources']+result.get('sources',[])))
                     store.save_contacts(row['id'],result)
                     db.execute('UPDATE cloud_jobs SET position=?,updated_at=now() WHERE id=?',(index+1,job['id']))
                 model_failures=0
@@ -182,6 +178,18 @@ def execute_job(store,job,owner,shutdown):
     finally:finished.set();stop.set();heartbeat.join(timeout=6)
 
 
+def run_once(store,shutdown):
+    """Claim and run at most one queued job. Returns True when a job was handled."""
+    owner=uuid.uuid4().hex
+    job=store.claim_job(owner)
+    if not job:return False
+    if job.get('owner'):execute_job(store.for_user(job['owner']),job,owner,shutdown)
+    # No requested_by means no account context: never run it under the system store, where
+    # the database default would attribute that member's results to 小姜.
+    else:store.fail_orphan_job(job['id'],'任务缺少归属账号，已终止')
+    return True
+
+
 def main():
     shutdown=threading.Event()
     signal.signal(signal.SIGTERM,lambda *_:shutdown.set());signal.signal(signal.SIGINT,lambda *_:shutdown.set())
@@ -189,10 +197,8 @@ def main():
     print('Supplier Scout cloud worker ready',flush=True)
     while not shutdown.is_set():
         try:
-            owner=uuid.uuid4().hex
-            job=store.claim_job(owner)
-            if job:
-                execute_job(store.for_user(job['owner']) if job.get('owner') else store,job,owner,shutdown);idle_since=time.monotonic()
+            if run_once(store,shutdown):
+                idle_since=time.monotonic()
             else:
                 from cloud_scaling import stop_if_idle
                 if time.monotonic()-idle_since>=60 and stop_if_idle(store):break

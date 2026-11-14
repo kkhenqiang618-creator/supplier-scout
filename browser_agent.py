@@ -27,13 +27,17 @@ from entry_recovery import migration_candidates,verified_destination,canonical_u
 ROOT=Path(__file__).resolve().parent
 CONTACT_TYPES={'email','phone','wechat','qq','qq_group','wechat_link','official_account','telegram','discord','contact_form','online_service','qrcode','other'}
 
-class AgentServiceError(ValueError):pass
+class AgentServiceError(ValueError):
+    """Agent could not finish this site for a non-transient service reason; .partial keeps work found so far."""
+    def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
 class BrowserRuntimeError(ValueError):
     """Moli or Playwright is missing or will not start: an environment problem, not this site's fault, so the batch stops."""
 class BrowserDeadError(ValueError):
     """Worker gone or unresponsive past COMMAND_TIMEOUT: later browser actions cannot succeed, so the site ends now."""
 class ModelTransientSiteError(ValueError):
-    """Model stayed unavailable after retries: ends this site only; .partial is the result so far (contact_status incomplete, or blocked/incomplete when nothing was found)."""
+    """Model still unavailable after retries for this site only; the batch should continue.
+    collect_site raises it for worker message {'kind':'error','fatal':False,'model_transient':True,'partial':...}.
+    .partial is a run_agent-shaped result (contacts, contact_records, contact_status, contact_summary, sources, steps, warnings, offers, scope, model_transient=True) with records found so far, or None."""
     def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
 MODEL_TRANSIENT_SUMMARY='模型服务暂时不可用（已重试），本站未完成，可稍后重试'
 RENDER_WEAK_WARNING='页面渲染不完整（Moli 可能不支持该站），建议用 Chrome 重试'

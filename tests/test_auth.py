@@ -122,6 +122,31 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(self.request('/api/auth/login','POST',{'username':'owner','password':'wrong'})[0], 401)
         self.assertEqual(self.login()[0], 429)
 
+    def test_login_throttle_is_per_account_so_a_shared_address_does_not_lock_out_colleagues(self):
+        for _ in range(5):
+            self.assertEqual(self.request('/api/auth/login','POST',{'username':'owner','password':'wrong'})[0],401)
+        self.assertEqual(self.request('/api/auth/login','POST',{'username':'owner','password':'wrong'})[0],429)
+        self.assertEqual(self.request('/api/auth/login','POST',{'username':'teammate','password':'wrong'})[0],401)
+
+    def test_login_throttle_uses_the_forwarded_client_address_behind_vercel(self):
+        with patch.dict(os.environ,{'VERCEL':'1'}):
+            for _ in range(5):
+                self.assertEqual(self.request('/api/auth/login','POST',{'username':'owner','password':'wrong'},{'X-Real-Ip':'203.0.113.7'})[0],401)
+            blocked=self.request('/api/auth/login','POST',{'username':'owner','password':'wrong'},{'X-Real-Ip':'203.0.113.7'})
+            other=self.request('/api/auth/login','POST',{'username':'owner','password':'wrong'},{'X-Real-Ip':'203.0.113.8'})
+        self.assertEqual(blocked[0],429);self.assertEqual(other[0],401)
+
+    def test_forwarded_headers_are_ignored_without_the_platform_flag(self):
+        module=self.auth_module
+        class Fake:
+            client_address=('127.0.0.1',1234)
+            headers={'x-real-ip':'203.0.113.7','x-forwarded-for':'198.51.100.9, 203.0.113.7'}
+        with patch.dict(os.environ,{},clear=True):
+            self.assertEqual(module.client_ip(Fake()),'127.0.0.1')
+        with patch.dict(os.environ,{'VERCEL':'1'}):
+            self.assertEqual(module.client_ip(Fake()),'203.0.113.7')
+            Fake.headers={'x-forwarded-for':'198.51.100.9, 203.0.113.7'}
+            self.assertEqual(module.client_ip(Fake()),'203.0.113.7')
     def test_next_target_cannot_redirect_to_another_origin(self):
         for unsafe in ['//evil.example', 'https://evil.example', '/\\evil.example', '/%2f%2fevil.example', '/\r\nX: evil']:
             self.assertEqual(json.loads(self.login(next=unsafe)[2])['next'], '/')
