@@ -57,7 +57,10 @@ class CloudBusinessHandler(Handler):
             except (ValueError,KeyError):return self.send({'error':'供应商不存在'},404)
         return super().do_GET()
     def do_POST(self):
-        if int(self.headers.get('Content-Length','0'))>4*1024*1024:return self.send({'error':'云端单次请求过大，请将原始文件控制在3MB以内'},413)
+        try:length=int(self.headers.get('Content-Length','0') or 0)
+        except (TypeError,ValueError):return self.send({'error':'Content-Length 不是合法数字'},400)
+        if length<0:return self.send({'error':'Content-Length 不是合法数字'},400)
+        if length>4*1024*1024:return self.send({'error':'云端单次请求过大，请将原始文件控制在3MB以内'},413)
         from cloud_scaling import REQUEST_TOKEN
         request_token=REQUEST_TOKEN.set(self.headers.get('x-vercel-oidc-token',''))
         try:return super().do_POST()

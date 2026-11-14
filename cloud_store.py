@@ -14,7 +14,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from cryptography.fernet import Fernet
 from model_service import ModelService
-from server import Store, encode, now, merge_sources
+from server import Store, encode, now, merge_sources, merge_contacts
 from rulebook import A_RULES
 
 WRITE_LOCK=732198461
@@ -146,12 +146,8 @@ class PostgresStore(Store):
     def import_rows(self,*args,**kwargs):return self._write(Store.import_rows,*args,**kwargs)
     def save_result(self,sid,result):
         with self.database.transaction(write=True),self.lock:
-            current=self.get(sid);contacts={kind:list(values) for kind,values in current['contacts'].items()}
-            for kind,values in result.get('contacts',{}).items():
-                known={str(value).casefold() for value in contacts.get(kind,[])}
-                for value in values:
-                    if str(value).casefold() not in known:
-                        contacts.setdefault(kind,[]).append(value);known.add(str(value).casefold())
+            current=self.get(sid)
+            contacts=merge_contacts(current['contacts'],result.get('contacts'))
             return Store.save_result(self,sid,dict(result,contacts=contacts,sources=merge_sources(current['sources'],result.get('sources',[]))))
     def save_contacts(self,*args,**kwargs):return self._write(Store.save_contacts,*args,**kwargs)
     def update_entry(self,*args,**kwargs):return self._write(Store.update_entry,*args,**kwargs)
@@ -277,6 +273,11 @@ class PostgresStore(Store):
             row=db.execute("SELECT * FROM cloud_jobs WHERE status='queued' OR (status IN ('running','stopping') AND lease_until<now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1").fetchone()
             if not row:return None
             return db.execute("UPDATE cloud_jobs SET status=CASE WHEN cancel_requested THEN 'stopping' ELSE 'running' END,lease_owner=?,lease_until=now()+interval '45 seconds',state=state||?,updated_at=now() WHERE id=? RETURNING *",(owner,Jsonb({'claimed_at':time.time(),'heartbeat_at':time.time()}),row['id'])).fetchone()
+    def fail_orphan_job(self,job_id,message):
+        """A job with no requested_by has no user context: running it would file that member's
+        results under whoever owns the database default, so it is closed as failed instead."""
+        with self.database.transaction(write=True) as db:
+            db.execute("UPDATE cloud_jobs SET status='failed',lease_owner=NULL,lease_until=NULL,updated_at=now(),state=state||? WHERE id=?",(Jsonb({'current':'','error':message,'stage':'云端批次未启动：缺少归属账号'}),job_id))
     @contextlib.contextmanager
     def fenced(self,job_id,owner):
         with self.database.transaction(write=True) as db:

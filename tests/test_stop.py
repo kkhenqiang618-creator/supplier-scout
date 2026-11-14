@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 from server import Store
+from support import requires_runtime
 
 class StopTests(unittest.TestCase):
     def test_stop_at_batch_completion_still_reaches_terminal_state(self):
@@ -29,6 +30,7 @@ class StopTests(unittest.TestCase):
             self.assertEqual(store.state()['suppliers'],before)
             self.assertTrue(any('已停止' in e['message'] for e in store.state()['events']))
             store.stop_job()  # repeated stop is harmless
+    @requires_runtime
     def test_default_run_only_collects_remaining_unchecked_rows(self):
         with tempfile.TemporaryDirectory() as folder:
             store=Store(os.path.join(folder,'test.db'),seed=False)

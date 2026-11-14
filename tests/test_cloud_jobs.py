@@ -183,6 +183,25 @@ class CloudJobResilienceTests(unittest.TestCase):
         self.assertIn('其他批次',PostgresStore.busy_message(None,True))
         unnamed={'owner':'','position':3,'total':9}
         self.assertEqual(PostgresStore.busy_message(unnamed,True),'云端浏览器正在执行其他批次，请稍后重试')
+    def test_job_without_owner_is_closed_instead_of_running_as_the_default_account(self):
+        import cloud_worker
+        store=MagicMock();store.claim_job.return_value={'id':'orphan','owner':None}
+        with patch.object(cloud_worker,'execute_job') as execute:
+            self.assertTrue(cloud_worker.run_once(store,threading.Event()))
+        execute.assert_not_called();store.for_user.assert_not_called()
+        store.fail_orphan_job.assert_called_once()
+        self.assertEqual(store.fail_orphan_job.call_args.args[0],'orphan')
+        store.claim_job.return_value=None
+        self.assertFalse(cloud_worker.run_once(store,threading.Event()))
+        store.fail_orphan_job.assert_called_once()
+    def test_owned_job_runs_under_that_members_store(self):
+        import cloud_worker
+        store=MagicMock();store.claim_job.return_value={'id':'job','owner':'小吴'}
+        with patch.object(cloud_worker,'execute_job') as execute:
+            self.assertTrue(cloud_worker.run_once(store,threading.Event()))
+        store.for_user.assert_called_once_with('小吴')
+        self.assertEqual(execute.call_args.args[0],store.for_user.return_value)
+        store.fail_orphan_job.assert_not_called()
     def test_start_job_collision_reports_the_occupant(self):
         import psycopg
         store,_=self.scripted_store(None)

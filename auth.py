@@ -28,6 +28,30 @@ COOKIE_NAME = 'scout_session'
 MAX_LOGIN_BYTES = 8192
 
 
+def client_ip(handler):
+    """Return the caller's address, not the proxy's.
+
+    Behind Vercel every request reaches us from the same proxy socket, so keying login
+    throttling on client_address would let one member's five failures lock out the whole
+    team. The edge sets x-real-ip to the address it observed; x-forwarded-for is only
+    trusted for its last hop because anything to the left may be client-supplied.
+    """
+    address = handler.client_address[0]
+    if not os.environ.get('VERCEL'):
+        return address
+    observed = (handler.headers.get('x-real-ip') or '').strip()
+    if observed:
+        return observed
+    hops = (handler.headers.get('x-forwarded-for') or '').split(',')
+    return hops[-1].strip() or address
+
+
+def login_key(handler, username):
+    """Throttle per caller and per account: a shared office or proxy address must not let
+    one person's typos lock out colleagues who sign in as somebody else."""
+    return client_ip(handler) + '|' + username.casefold()
+
+
 def hash_password(password):
     """Return a salted PBKDF2-SHA256 verifier, compatible with Python 3.9+."""
     if not isinstance(password, str) or not password or len(password.encode('utf-8')) > 4096:
@@ -286,15 +310,15 @@ class AuthHandlerMixin:
                 return self._auth_reply(413, {'error':'请求内容过大'})
             if self.headers.get_content_type() != 'application/json':
                 return self._auth_reply(415, {'error':'请使用 JSON 请求'})
-            key = self.client_address[0]
-            if not auth.limiter.allow(key):
-                return self._auth_reply(429, {'error':'尝试次数过多，请在 15 分钟后重试'}, {'Retry-After':'900'})
             try:
                 data = json.loads(self.rfile.read(length))
                 if not isinstance(data, dict) or not isinstance(data.get('username'), str) or not isinstance(data.get('password'), str) or len(data['username']) > 256 or len(data['password'].encode('utf-8')) > 4096:
                     raise ValueError()
             except (ValueError, UnicodeError):
                 return self._auth_reply(400, {'error':'请输入有效的用户名和密码'})
+            key = login_key(self, data['username'])
+            if not auth.limiter.allow(key):
+                return self._auth_reply(429, {'error':'尝试次数过多，请在 15 分钟后重试'}, {'Retry-After':'900'})
             if not auth.verify(data['username'], data['password']):
                 auth.limiter.failed(key)
                 return self._auth_reply(401, {'error':'用户名或密码不正确'})

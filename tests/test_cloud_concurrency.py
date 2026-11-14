@@ -52,7 +52,8 @@ class CloudConcurrencyTests(unittest.TestCase):
         import cloud_worker
         owners=[]
         class FakeStore:
-            def claim_job(self,owner):owners.append(owner);return {'id':'job'}
+            def claim_job(self,owner):owners.append(owner);return {'id':'job','owner':'member'}
+            def for_user(self,username):return self
         def execute(store,job,owner,shutdown):
             if len(owners)==2:shutdown.set()
         with patch.object(cloud_worker,'PostgresStore',return_value=FakeStore()),patch.object(cloud_worker,'execute_job',side_effect=execute),patch.object(cloud_worker.signal,'signal'):

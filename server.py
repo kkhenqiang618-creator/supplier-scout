@@ -1,5 +1,3 @@
-from collection_diagnostics import collection_diagnostics
-from entry_recovery import validate_entry_url,canonical_url
 #!/usr/bin/env python3
 """Supplier Scout local workspace. No runtime dependencies. No outbound messaging."""
 import argparse
@@ -13,6 +11,7 @@ import os
 import re
 import sqlite3
 import threading
+import traceback
 import subprocess
 import signal
 import sys
@@ -27,22 +26,23 @@ from urllib.parse import urlsplit, parse_qs
 from model_service import ModelService
 from importers import MAX_FILE_BYTES, parse_file, parse_text, prepare_rows
 from engine import DEFAULT_RULES, evaluate, extract_page, crawl, validate_rules
+from collection_diagnostics import collection_diagnostics
+from entry_recovery import validate_entry_url,canonical_url
+from browser_agent import AgentServiceError,ModelTransientSiteError
 
 ROOT=Path(__file__).resolve().parent
 
 def now(): return datetime.now(timezone.utc).isoformat(timespec='seconds')
 def encode(value): return json.dumps(value,ensure_ascii=False,allow_nan=False)
 
+def log_exception(where):
+    """Keep the stack trace server-side; clients only get a generic 500 message."""
+    try: traceback.print_exc(file=sys.stderr); sys.stderr.write('500 in '+where+'\n'); sys.stderr.flush()
+    except Exception: pass
+
 class CollectionCancelled(Exception): pass
-class AgentServiceError(ValueError):
-    def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
 class BatchRuntimeError(ValueError):
     """Browser runtime (Moli/Playwright) missing or refusing to start: stop the batch instead of marking every site blocked."""
-class ModelTransientSiteError(ValueError):
-    """Model still unavailable after retries for this site only; the batch should continue.
-    collect_site raises it for worker message {'kind':'error','fatal':False,'model_transient':True,'partial':...}.
-    .partial is a run_agent-shaped result (contacts, contact_records, contact_status, contact_summary, sources, steps, warnings, offers, scope, model_transient=True) with records found so far, or None."""
-    def __init__(self,message,partial=None):super().__init__(message);self.partial=partial
 
 # Hard per-site cut-off; stays above browser_agent's soft deadline - reserve + worst step tail for each scope (see the budget comment there).
 SITE_HARD_TIMEOUT={'all':840,'contacts':480}
@@ -138,6 +138,18 @@ def merge_sources(*groups):
         for item in group:
             key=(item.get('url'),item.get('excerpt'))
             if key not in known:merged.append(item);known.add(key)
+    return merged
+
+def merge_contacts(*groups):
+    """Merge contact lists by kind, dropping repeats that differ only by case and keeping the first spelling and order."""
+    merged={}
+    for group in groups:
+        for kind,values in (group or {}).items():
+            kept=merged.setdefault(kind,[])
+            known={str(value).casefold() for value in kept}
+            for value in values or []:
+                folded=str(value).casefold()
+                if folded not in known:kept.append(value);known.add(folded)
     return merged
 
 def quote_fingerprint(offers):
@@ -340,12 +352,7 @@ class Store:
                     row=dict(row,contact_result=entry_detail)
                 except ValueError as error:
                     result=dict(result,warnings=list(result.get('warnings') or [])+['新入口未自动写入：'+str(error)])
-            contacts={key:list(value) for key,value in row['contacts'].items()}
-            for kind,values in result.get('contacts',{}).items():
-                existing={str(value).lower() for value in contacts.get(kind,[])}
-                for value in values:
-                    if str(value).lower() not in existing:
-                        contacts.setdefault(kind,[]).append(value);existing.add(str(value).lower())
+            contacts=merge_contacts(row['contacts'],result.get('contacts'))
             sources=list(row['sources'])
             known={(entry.get('url'),entry.get('excerpt')) for entry in sources}
             for entry in result.get('sources',[]):
@@ -432,9 +439,8 @@ class Store:
                     with self.lock:
                         if self.stop_event.is_set(): raise CollectionCancelled()
                         if scope=='all':
-                            prior=self.get(row['id']);merged={k:list(v) for k,v in prior['contacts'].items()}
-                            for kind,values in result.get('contacts',{}).items():merged[kind]=sorted(set(merged.get(kind,[])+values))
-                            self.save_result(row['id'],dict(result,contacts=merged,sources=prior['sources']+result.get('sources',[])))
+                            prior=self.get(row['id'])
+                            self.save_result(row['id'],dict(result,contacts=merge_contacts(prior['contacts'],result.get('contacts')),sources=prior['sources']+result.get('sources',[])))
                         self.save_contacts(row['id'],result)
                         self.job['done']+=1
                     model_failures=0
@@ -556,7 +562,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send((ROOT/'static'/name).read_bytes(),ctype=mime)
             return self.send({'error':'路径不存在'},404)
         except (ValueError,KeyError) as e: self.send({'error':str(e)},400)
-        except Exception as e: self.send({'error':'服务错误：'+str(e)},500)
+        except Exception:
+            log_exception('do_GET')
+            self.send({'error':'服务器内部错误，请稍后重试'},500)
     def do_POST(self):
         if not self.check_host(): return self.send({'error':'仅允许本机访问'},403)
         origin=self.headers.get('Origin')
@@ -600,14 +608,16 @@ class Handler(BaseHTTPRequestHandler):
                 if not content or len(content)>30000: raise ValueError('请粘贴 1–30000 字回复内容')
                 # Escape pasted text so literal markup cannot hide evidence.
                 page=extract_page('<p>'+html.escape(content).replace('\n','</p><p>')+'</p>','手动粘贴回复 #S'+str(row['id']))
-                contacts={key:sorted(set(row['contacts'].get(key,[])+page['contacts'].get(key,[]))) for key in set(row['contacts'])|set(page['contacts'])}
+                contacts=merge_contacts(row['contacts'],page['contacts'])
                 offers=page['offers']
                 store.save_result(row['id'],{'contacts':contacts,'offers':offers,'sources':row['sources']+[{'url':'手动粘贴回复','excerpt':content,'created_at':now()}],'warnings':[] if offers else ['未识别明确折扣，需要人工复核；历史报价保留在报价历史中']})
                 result={'ok':True,'offers':len(offers)}
             else: return self.send({'error':'路径不存在'},404)
             self.send(result)
         except (ValueError,KeyError,TypeError) as e: self.send({'error':str(e)},400)
-        except Exception as e: self.send({'error':'服务错误：'+str(e)},500)
+        except Exception:
+            log_exception('do_POST')
+            self.send({'error':'服务器内部错误，请稍后重试'},500)
 
 def create_server(port=8765,path=None,seed=True):
     server=ThreadingHTTPServer(('127.0.0.1',port),Handler); server.daemon_threads=True; server.store=Store(path or ROOT/'data'/'supplier.db',seed=seed); return server

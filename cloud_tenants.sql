@@ -1,11 +1,13 @@
 -- Existing private-schema data is preserved; pre-isolation shared data belongs to 小姜.
+-- owner defaults to the logged-in account only: a write without a user context now fails
+-- instead of silently landing in 小姜's rows.
 DO $block$
 DECLARE t text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['suppliers','settings','events','history','drafts','cloud_jobs'] LOOP
     EXECUTE format('ALTER TABLE scout_private.%I ADD COLUMN IF NOT EXISTS owner text',t);
     EXECUTE format('UPDATE scout_private.%I SET owner = %L WHERE owner IS NULL',t,'小姜');
-    EXECUTE format('ALTER TABLE scout_private.%I ALTER COLUMN owner SET DEFAULT COALESCE(NULLIF(current_setting(''scout.username'',true),''''),''小姜'')',t);
+    EXECUTE format('ALTER TABLE scout_private.%I ALTER COLUMN owner SET DEFAULT NULLIF(current_setting(''scout.username'',true),'''')',t);
     EXECUTE format('ALTER TABLE scout_private.%I ALTER COLUMN owner SET NOT NULL',t);
     EXECUTE format('ALTER TABLE scout_private.%I ENABLE ROW LEVEL SECURITY',t);
     EXECUTE format('DROP POLICY IF EXISTS app_access ON scout_private.%I',t);
