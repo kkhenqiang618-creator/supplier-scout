@@ -20,6 +20,9 @@ from rulebook import A_RULES
 WRITE_LOCK=732198461
 IDLE={'status':'idle','stopping':False,'stage':'','running':False,'total':0,'done':0,'mode':'real','current':''}
 ACTIVE=('queued','running','stopping')
+# Pre-isolation rows belong to this account. Writes made without a logged-in user must name an
+# owner explicitly: the tenant column is NOT NULL with no default outside a user context.
+LEGACY_OWNER='小姜'
 
 class LostLease(RuntimeError):pass
 
@@ -81,7 +84,8 @@ class CloudModelService(ModelService):
         return json.loads(self.cipher.decrypt(row['value'].encode())) if row else {}
     def _write(self,data):
         value=self.cipher.encrypt(encode(data).encode()).decode()
-        with self.database.transaction(write=True) as db:db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(self.setting_key,value))
+        owner=getattr(self.database,'username',None) or (self.setting_key.split(':user:',1)[1] if ':user:' in self.setting_key else LEGACY_OWNER)
+        with self.database.transaction(write=True) as db:db.execute("INSERT INTO settings(key,value,owner) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(self.setting_key,value,owner))
     def _finish_test(self,config,original_model,answer):
         with self.lock,self.database.transaction(write=True):
             return super()._finish_test(config,original_model,answer)
@@ -125,7 +129,7 @@ class PostgresLoginLimiter:
 class PostgresStore(Store):
     def __init__(self,database=None):
         self.database=database or Database();self.lock=threading.RLock();self.model_service=CloudModelService(self.database);self.path='postgres'
-        with self.database.transaction(write=True) as db:db.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',('rules',encode(A_RULES)))
+        with self.database.transaction(write=True) as db:db.execute('INSERT OR IGNORE INTO settings(key,value,owner) VALUES(?,?,?)',('rules',encode(A_RULES),LEGACY_OWNER))
     def for_user(self,username):
         if not isinstance(username,str) or not username:raise ValueError('请先登录')
         scoped=copy.copy(self);scoped.username=username;scoped.database=self.database.for_user(username)
@@ -158,7 +162,7 @@ class PostgresStore(Store):
         from engine import validate_rules
         validate_rules(rules)
         key='rules:user:'+self.username if getattr(self,'username',None) else 'rules'
-        with self.database.transaction(write=True) as db:db.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,encode(rules)))
+        with self.database.transaction(write=True) as db:db.execute('INSERT INTO settings(key,value,owner) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,encode(rules),getattr(self,'username',None) or LEGACY_OWNER))
         self.event('已更新个人报价规则；历史判断保留，重新采集后应用')
     @property
     def job(self):
