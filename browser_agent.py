@@ -740,6 +740,25 @@ def is_newapi(payload):
     return 'system_name' in keys or 'announcements' in keys or 'footer_html' in keys
 
 
+def unwrap_api(payload):
+    """new-api answers wrap the real body in {"success": true, "message": "", "data": ...}.
+
+    Returns the inner value when the outer object is only that envelope; a plain dict, a
+    JSON string that parses to an object, or any other payload is returned unchanged.
+    """
+    if not isinstance(payload, dict) or 'data' not in payload:
+        return payload
+    data = payload['data']
+    if isinstance(data, str):
+        text = data.strip()
+        if text[:1] in ('{', '['):
+            try:
+                return json.loads(text)
+            except ValueError:
+                return data
+    return data
+
+
 def fetch_public_api(url):
     """One public GET through the collection egress; JSON/text responses only."""
     validate_url(url)
@@ -776,6 +795,7 @@ def api_observation(url, payload):
 def api_contact_records(observations):
     """Extract contacts from public API text with the exact line as evidence."""
     records = []
+    seen = set()  # one record per (type, value) across the whole probe; the first line keeps the evidence
     for observation in observations:
         text = observed_text(observation)
         for line in text.splitlines():
@@ -789,7 +809,6 @@ def api_contact_records(observations):
                 (value, 'wechat' if re.search(r'微信|wechat|weixin', line, re.I) else 'qq')
                 for value in API_LABELED_HANDLE.findall(line)
             ]
-            seen = set()
             for value, kind in values:
                 if (kind, value.lower()) in seen:
                     continue
@@ -821,7 +840,7 @@ def probe_public_api(page_url, allow, log=lambda message: None):
     try:
         allow(base + PUBLIC_API_PATHS[0])
         body, _ = fetch_public_api(base + PUBLIC_API_PATHS[0])
-        status = json.loads(body)
+        status = unwrap_api(json.loads(body))
     except Exception:
         return []
     if not is_newapi(status):
@@ -834,7 +853,7 @@ def probe_public_api(page_url, allow, log=lambda message: None):
                 allow(base + path)
                 body, _ = fetch_public_api(base + path)
                 try:
-                    payload = json.loads(body)
+                    payload = unwrap_api(json.loads(body))
                 except ValueError:
                     payload = body
             except Exception:
