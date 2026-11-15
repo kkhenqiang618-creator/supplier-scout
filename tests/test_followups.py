@@ -33,6 +33,17 @@ class WorkspaceHttpTests(test_api.ApiTests):
         self.assertEqual(record['status'],'done')
         self.assertEqual([item['status'] for item in record['history']],['waiting','done'])
         self.assertEqual(record['history'][0]['note'],'已手动联系')
+    def test_followups_are_stored_per_supplier_and_legacy_blob_still_reads(self):
+        sid=self.fixture()
+        self.assertEqual(self.call('/api/followup',{'id':sid,'status':'waiting','note':'第一次'})[0],200)
+        with self.app.store.connect() as db:
+            keys=[row[0] for row in db.execute("SELECT key FROM settings WHERE key LIKE 'followups%'")]
+            self.assertEqual(keys,['followups:'+str(sid)])
+            legacy={'7':{'id':7,'status':'done','note':'旧记录','created_at':'2026-01-01T00:00:00+00:00','updated_at':'2026-01-01T00:00:00+00:00','history':[]}}
+            db.execute("INSERT INTO settings(key,value) VALUES('followups',?)",(json.dumps(legacy,ensure_ascii=False),))
+        followups=self.app.store.state()['followups']
+        self.assertEqual(followups[str(sid)]['note'],'第一次')
+        self.assertEqual(followups['7']['note'],'旧记录')
     def test_pricing_full_offers_history_and_no_model_service(self):
         sid=self.fixture()
         response=self.call('/api/pricing?mode=real');self.assertEqual(response[0],200)

@@ -214,20 +214,44 @@ class Store:
     def setting(self,key,default=None):
         with self.connect() as db:row=db.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
         return json.loads(row['value']) if row else default
+    def followup_prefix(self):
+        return self.workspace_key('followups')+':'
     def followups(self):
-        return self.setting(self.workspace_key('followups'),{})
+        """All follow-up records of this workspace, one settings row per supplier.
+
+        Saving a record used to read and rewrite one JSON blob holding every record.
+        Each record now lives under its own key, so a single save touches one row.
+        The legacy blob is still read for workspaces written before this split.
+        """
+        prefix=self.followup_prefix();records={}
+        legacy=self.setting(self.workspace_key('followups'),{})
+        if isinstance(legacy,dict):records.update({str(key):value for key,value in legacy.items() if isinstance(value,dict)})
+        pattern=prefix.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
+        with self.connect() as db:
+            rows=db.execute("SELECT key,value FROM settings WHERE key LIKE ? ESCAPE '\\'",(pattern,)).fetchall()
+        for row in rows:
+            try:record=json.loads(row['value'])
+            except (TypeError,ValueError):continue
+            if isinstance(record,dict):records[row['key'][len(prefix):]]=record
+        return records
+    def followup(self,sid):
+        with self.connect() as db:row=db.execute('SELECT value FROM settings WHERE key=?',(self.followup_prefix()+str(sid),)).fetchone()
+        if row:
+            try:record=json.loads(row['value'])
+            except (TypeError,ValueError):record=None
+            if isinstance(record,dict):return record
+        return self.followups().get(str(sid),{})
     def save_followup(self,sid,status,note):
         with self.lock,self.connect() as db:
             self.get(sid)
             if status not in ('waiting','replied','quote','done'):raise ValueError('跟进状态无效')
             if not isinstance(note,str) or not note.strip() or len(note)>5000:raise ValueError('请填写 1–5000 字联系记录')
-            records=self.followups();previous=records.get(str(sid),{})
+            previous=self.followup(sid)
             stamp=now();entry={'status':status,'note':note.strip(),'updated_at':stamp}
             history=list(previous.get('history') or [])
             if previous and not history:history=[{key:previous.get(key) for key in ('status','note','updated_at')}]
             record={'id':sid,**entry,'created_at':previous.get('created_at') or stamp,'history':(history+[entry])[-100:]}
-            records[str(sid)]=record
-            db.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(self.workspace_key('followups'),encode(records)))
+            db.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(self.followup_prefix()+str(sid),encode(record)))
             return record
     def draft_recipient(self,sid):
         row=self.get(sid)
