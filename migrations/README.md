@@ -20,6 +20,40 @@ Rules for every script:
    rolls the whole file back.
 
 `0002_json_and_time_columns.sql` converts the JSON documents to `jsonb` and the
-ISO timestamps to `timestamptz`.  The Python layer already binds JSON strings
-as `jsonb` and ISO strings as `timestamptz`, and reads both back as text, so
-old (TEXT) and new (jsonb/timestamptz) schemas behave identically to the app.
+ISO timestamps to `timestamptz`.  The Python layer sends JSON and ISO strings
+untyped and reads rows tolerantly (dict/list as well as text, `datetime` as well
+as text), so old (TEXT) and new (jsonb/timestamptz) schemas behave identically
+to the app.
+
+The JSON columns carry TEXT defaults (`'{}'` / `'[]'`) in
+`cloud_schema.sql`.  Postgres cannot cast such a default to `jsonb`, so the
+script drops the default before the type change and restores it as
+`'{}'::jsonb` / `'[]'::jsonb` afterwards (history.offers has no default and is
+left without one).  Without that, `ALTER COLUMN ... TYPE jsonb` fails with
+`default for column "contacts" cannot be cast automatically to type jsonb`.
+
+## Verifying 0002 before production
+
+Never run it on the production database first.  Use a scratch database that was
+created from `cloud_schema.sql` + `cloud_tenants.sql` (a PGlite instance is
+enough; it speaks the Postgres wire protocol):
+
+```sh
+psql "$SCRATCH_DATABASE_URL" -1 -f migrations/postgres/0001_schema_migrations.sql
+psql "$SCRATCH_DATABASE_URL" -1 -f migrations/postgres/0002_json_and_time_columns.sql
+psql "$SCRATCH_DATABASE_URL" -1 -f migrations/postgres/0002_json_and_time_columns.sql   # second run: no change
+```
+
+Then check all three points:
+
+1. The script exits successfully and `SELECT count(*) FROM scout_private.suppliers`
+   is unchanged.
+2. `\d+ scout_private.suppliers` shows `contacts/offers/sources/warnings/contact_result`
+   as `jsonb` with defaults `'{}'::jsonb` / `'[]'::jsonb`, and
+   `checked_at/created_at/contact_checked_at` as `timestamptz`.
+3. An insert that relies on the defaults still works, e.g.
+   `INSERT INTO scout_private.suppliers(name,url,mode,created_at) VALUES ('x','https://x.example.com','real',now())`
+   then `SELECT contacts,offers FROM scout_private.suppliers WHERE name='x'` returns `{}` and `[]`.
+
+After the preview passes, take a backup and run the same two files (in order,
+with `-1`) on production, after deploying the code that reads both shapes.
