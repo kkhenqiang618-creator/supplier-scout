@@ -31,7 +31,7 @@ class Store:
             for row in db.execute("SELECT id,contacts FROM suppliers WHERE contact_status='not_started'").fetchall():
                 if any(json.loads(row['contacts']).values()): db.execute("UPDATE suppliers SET contact_status='legacy' WHERE id=?",(row['id'],))
             db.execute('INSERT OR IGNORE INTO settings VALUES(?,?)',('rules',encode(DEFAULT_RULES)))
-            count=db.execute('SELECT count(*) FROM suppliers WHERE mode="demo"').fetchone()[0]
+            count=db.execute("SELECT count(*) FROM suppliers WHERE mode='demo'").fetchone()[0]
         if seed and not count: self.seed()
     @contextlib.contextmanager
     def connect(self):
@@ -49,7 +49,7 @@ class Store:
         finally:
             db.close()
     def rules(self):
-        with self.connect() as db: return json.loads(db.execute('SELECT value FROM settings WHERE key="rules"').fetchone()[0])
+        with self.connect() as db: return json.loads(db.execute("SELECT value FROM settings WHERE key='rules'").fetchone()[0])
     def event(self,message,sid=None,mode='real'):
         with self.lock,self.connect() as db: db.execute('INSERT INTO events(supplier_id,mode,message,created_at) VALUES(?,?,?,?)',(sid,mode,message,now()))
     def get(self,sid):
@@ -168,11 +168,11 @@ class Store:
         if rejected: raise ValueError('第 '+str(rejected[0]['row'])+' 行：'+rejected[0]['reason'])
         added=0
         with self.lock,self.connect() as db:
-            numeric=[int(r[0]) for r in db.execute('SELECT name FROM suppliers WHERE mode="real"') if str(r[0]).isdigit()]
+            numeric=[int(r[0]) for r in db.execute("SELECT name FROM suppliers WHERE mode='real'") if str(r[0]).isdigit()]
             explicit=[int(row['name']) for row in valid if str(row.get('name','')).isdigit()]
             next_number=max(numeric+explicit+[0])+1
             for row in valid:
-                if db.execute('SELECT 1 FROM suppliers WHERE url=? AND mode="real"',(row['url'],)).fetchone(): continue
+                if db.execute("SELECT 1 FROM suppliers WHERE url=? AND mode='real'",(row['url'],)).fetchone(): continue
                 name=str(row.get('name') or '').strip()
                 if not name:
                     name=str(next_number); next_number+=1
@@ -266,7 +266,7 @@ class Store:
         self.event('人工复核 '+row['name']+'：'+note[:1500],sid,row['mode'])
     def update_rules(self,rules):
         validate_rules(rules)
-        with self.lock,self.connect() as db: db.execute('UPDATE settings SET value=? WHERE key="rules"',(encode(rules),))
+        with self.lock,self.connect() as db: db.execute("UPDATE settings SET value=? WHERE key='rules'",(encode(rules),))
         self.event('已更新折扣规则；历史判断保留，重新分析后应用新规则')
     def seed(self):
         fixtures=[('云桥 API','YQ','deepseek-v3',.35,'qualified'),('星河算力','XH','deepseek-r1',.38,'qualified'),('Token Harbor','TH','gpt-4o',.5,'qualified'),('青禾智能','QH','deepseek-v3',.32,'qualified'),('北辰模型服务','BC','deepseek-r1',.46,'review'),('Flow API','FL','gpt-4o',.6,'review'),('知行云','ZX','deepseek-v3',.18,'review'),('极速智算','JS','deepseek-v3',.75,'skipped'),('远山科技','YS','deepseek-r1',.68,'skipped'),('一叶云','YY','deepseek-v3',None,'pending'),('灵犀接口','LX','gpt-4o',None,'pending'),('橙子算力','CZ','deepseek-r1',.36,'review')]
@@ -370,7 +370,7 @@ class LocalBatchTarget:
         with store.lock:
             if store.stop_event.is_set():raise CollectionCancelled()
             if scope=='all' and not manual_decision(store.get(row['id'])):
-                with store.connect() as db:db.execute('UPDATE suppliers SET status="error",reason=?,checked_at=? WHERE id=?',(str(error)[:1500],now(),row['id']))
+                with store.connect() as db:db.execute("UPDATE suppliers SET status='error',reason=?,checked_at=? WHERE id=?",(str(error)[:1500],now(),row['id']))
             store.save_contacts(row['id'],{'contact_status':'blocked','contact_summary':str(error)[:500],'contacts':{},'sources':[],'warnings':[str(error)],'scope':scope})
             store.event('采集失败 '+row['name']+'：'+str(error)[:500],row['id'],self.mode)
             store.job['done']+=1

@@ -39,14 +39,40 @@ class Cursor:
     def fetchall(self):return [Row(row) for row in self.cursor.fetchall()]
     def __iter__(self):return iter(self.fetchall())
 
+def adapt_placeholders(statement):
+    """Rewrite '?' placeholders for psycopg without touching quoted literals.
+
+    The SQLite store writes plain SQL with single-quoted literals; only the
+    placeholder marker differs on Postgres.  Scanning instead of replacing
+    keeps literal text such as '100%?' intact (literal '%' is doubled for
+    psycopg's placeholder syntax).
+    """
+    out=[];quote=None;i=0;n=len(statement)
+    while i<n:
+        char=statement[i]
+        if quote is not None:
+            if char==quote:
+                if i+1<n and statement[i+1]==quote:out.append(char*2);i+=2;continue
+                quote=None
+            elif char=='%':out.append('%%');i+=1;continue
+            out.append(char);i+=1;continue
+        if char=="'":quote=char
+        elif char=='?':out.append('%s');i+=1;continue
+        out.append(char);i+=1
+    return ''.join(out)
+
 class SQL:
-    """Adapt only the small, fixed SQLite statement vocabulary used by Store."""
+    """Adapt only the small, fixed SQLite statement vocabulary used by Store.
+
+    Statements must use single-quoted SQL literals.  The adapter rewrites
+    placeholders, drops SQLite's INSERT OR IGNORE, and adds the RETURNING clause
+    the store expects from supplier inserts; it does not reinterpret quoting.
+    """
     def __init__(self,connection):self.connection=connection
     def execute(self,statement,parameters=()):
         statement=statement.strip();ignore=bool(re.match(r'INSERT OR IGNORE',statement,re.I))
         statement=re.sub(r'^INSERT OR IGNORE','INSERT',statement,flags=re.I)
-        statement=re.sub(r'"([^"\n]*)"',lambda m:"'"+m[1].replace("'","''")+"'",statement)
-        statement=statement.replace('?', '%s')
+        statement=adapt_placeholders(statement)
         if ignore:statement+=' ON CONFLICT DO NOTHING'
         returning=bool(re.match(r'INSERT INTO suppliers\b',statement,re.I)) and 'RETURNING' not in statement.upper()
         if returning:statement+=' RETURNING id'
