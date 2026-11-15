@@ -1,13 +1,16 @@
 """Cloud HTTP framing: a malformed Content-Length must be a 4xx, never an uncaught exception."""
+
 import unittest
 from cloud_http import CloudBusinessHandler
 
 
 class Dummy:
     """Just enough of a handler for the framing checks that run before the body is read."""
+
     def __init__(self, length):
         self.headers = {'Content-Length': length}
         self.sent = []
+
     def send(self, payload, status=200):
         self.sent.append((status, payload))
 

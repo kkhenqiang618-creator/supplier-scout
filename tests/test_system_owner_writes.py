@@ -1,4 +1,5 @@
 """Writes made without a logged-in user must name their owner explicitly (P9, PR #8 review)."""
+
 import contextlib
 import os
 import re
@@ -13,8 +14,12 @@ INSERT_PATTERN = re.compile(r'INSERT(?:\s+OR\s+IGNORE)?\s+INTO\s+(\w+)\s*\(([^)]
 
 class Cursor:
     rowcount = 0
-    def fetchone(self): return None
-    def fetchall(self): return []
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
 
 
 class ProbeDatabase:

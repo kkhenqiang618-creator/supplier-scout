@@ -20,7 +20,9 @@ class ConnectionTestStatusTests(unittest.TestCase):
     def test_failed_retest_invalidates_past_success_and_records_latest_result(self):
         with patch.object(self.service, '_complete_once', return_value='OK'):
             self.service.test()
-        with patch.object(self.service, '_complete_once', side_effect=ModelTransientError('连接失败', phase='request')):
+        with patch.object(
+            self.service, '_complete_once', side_effect=ModelTransientError('连接失败', phase='request')
+        ):
             with self.assertRaises(ModelTransientError):
                 self.service.test()
         public = self.service.public()
@@ -30,7 +32,11 @@ class ConnectionTestStatusTests(unittest.TestCase):
         self.assertNotIn('test-secret', str(public))
 
     def test_transient_connection_failure_gets_one_recovery_attempt(self):
-        with patch.object(self.service, '_complete_once', side_effect=[ModelTransientError('连接失败', phase='request'), 'OK']):
+        with patch.object(
+            self.service,
+            '_complete_once',
+            side_effect=[ModelTransientError('连接失败', phase='request'), 'OK'],
+        ):
             result = self.service.test()
         self.assertEqual(result['reply'], 'OK')
         self.assertTrue(self.service.public()['tested'])
@@ -44,11 +50,14 @@ class ConnectionTestStatusTests(unittest.TestCase):
 
     def test_old_failure_cannot_invalidate_a_new_configuration(self):
         def changed(*args, **kwargs):
-            self.service.save({'base_url': 'https://provider.example/v1', 'model': 'new-model', 'api_key': ''})
+            self.service.save(
+                {'base_url': 'https://provider.example/v1', 'model': 'new-model', 'api_key': ''}
+            )
             current = self.service.read()
             current['tested'] = True
             self.service._write(current)
             raise ModelTransientError('等待回复超时', phase='response')
+
         with patch.object(self.service, '_complete_once', side_effect=changed):
             with self.assertRaises(ModelTransientError):
                 self.service.test()
@@ -58,12 +67,17 @@ class ConnectionTestStatusTests(unittest.TestCase):
     def test_overall_deadline_records_failure_and_ignores_late_success(self):
         release = threading.Event()
         finished = threading.Event()
+
         def slow(*args, **kwargs):
             release.wait(1)
             finished.set()
             return 'OK'
+
         try:
-            with patch.object(model_service, 'TEST_NETWORK_TIMEOUT', .03, create=True), patch.object(self.service, '_complete_once', side_effect=slow):
+            with (
+                patch.object(model_service, 'TEST_NETWORK_TIMEOUT', 0.03, create=True),
+                patch.object(self.service, '_complete_once', side_effect=slow),
+            ):
                 with self.assertRaisesRegex(ModelTransientError, '测试总时限'):
                     self.service.test()
                 self.assertFalse(self.service.public()['tested'])
