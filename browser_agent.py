@@ -2100,11 +2100,27 @@ def run_site(
     with a short budget; the extra sources are marked as the same-domain official site and
     a failure there never fails the site.
     """
+    start = clock()
     result = _run_site(url, scope, service, rules, log, moli_factory, chrome_factory, clock, chrome_ready)
     if result.get('contact_records') or scope not in ('contacts', 'all'):
         return result
+    if result.get('model_transient'):
+        # The model outage already decided this site's outcome; a second run would only eat the budget.
+        return result
     alt = main_site_url(url)
     if not alt:
+        return result
+    # The subprocess that runs us has a hard timeout and throws the whole site away when it hits.
+    # The first pass already spent part of it, so the second pass only gets what is left, minus the
+    # worst-case tail (browser close, robots fetch, one slow step) and a little startup slack.
+    from collection import SITE_HARD_TIMEOUT
+
+    now = clock()
+    cap = start + SITE_HARD_TIMEOUT[scope] - WORST_TAIL - 15
+    deadline = min(now + 180, cap)
+    needed = site_budget('contacts')['reserve'] + BROWSER_STARTUP
+    if deadline - now < needed:
+        result['warnings'].append('原网址未找到联系方式，剩余时间不足，未检查同主域官网')
         return result
     log('原网址未找到联系方式，改查同主域官网：' + alt)
     try:
@@ -2115,7 +2131,7 @@ def run_site(
             rules,
             log,
             browser_factory=moli_factory,
-            deadline=clock() + 180,
+            deadline=deadline,
             escalate_weak=False,
             clock=clock,
         )
@@ -2125,5 +2141,9 @@ def run_site(
     strip_internal(extra)
     if not extra.get('sources'):
         result['warnings'].append('同主域官网无法读取，已保留原网址结果')
+        return result
+    if not extra.get('contact_records'):
+        # Nothing found there: keep the original status and summary, the user's reason for it stays valid.
+        result['warnings'].append('已检查同主域官网（' + alt + '），未发现联系方式')
         return result
     return merge_main_site(result, extra, alt)
