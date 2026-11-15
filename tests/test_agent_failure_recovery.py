@@ -1,4 +1,5 @@
 """Browser failures must reach the existing batch recovery paths, without live services."""
+
 import json
 import tempfile
 import unittest
@@ -39,27 +40,57 @@ class AgentFailureRecoveryTests(fixtures.Harness):
         self.assertIn('连续 3 家不可用', store.finish_job.call_args.args[3])
 
     def test_node_process_creation_errors_stop_the_site_as_runtime_failures(self):
-        for error in (FileNotFoundError(2, 'node missing', 'node'), PermissionError(13, 'permission denied', 'node')):
+        for error in (
+            FileNotFoundError(2, 'node missing', 'node'),
+            PermissionError(13, 'permission denied', 'node'),
+        ):
             with self.subTest(error=type(error).__name__):
+
                 def factory(folder):
                     browser = object.__new__(browser_agent.Browser)
                     browser.stderr = None
                     browser._spawn('fixture-module', ['cdp', 'http://127.0.0.1:1'])
+
                 with tempfile.TemporaryDirectory() as folder:
                     service = fixtures.ModelService(folder + '/model.json')
                     service.save({'base_url': 'https://model.example/v1', 'model': 'fixture'})
-                    config = service.read(); config['tested'] = True; service._write(config)
-                    with patch('browser_agent.validate_url'), patch('engine.fetch', return_value=('User-agent: *\nAllow: /', fixtures.URL + 'robots.txt')), patch('browser_agent.subprocess.Popen', side_effect=error):
+                    config = service.read()
+                    config['tested'] = True
+                    service._write(config)
+                    with (
+                        patch('browser_agent.validate_url'),
+                        patch(
+                            'engine.fetch',
+                            return_value=('User-agent: *\nAllow: /', fixtures.URL + 'robots.txt'),
+                        ),
+                        patch('browser_agent.subprocess.Popen', side_effect=error),
+                    ):
                         with self.assertRaises(browser_agent.BrowserRuntimeError):
-                            browser_agent.run_site(fixtures.URL, 'contacts', service, [], moli_factory=factory, chrome_ready=lambda: False)
+                            browser_agent.run_site(
+                                fixtures.URL,
+                                'contacts',
+                                service,
+                                [],
+                                moli_factory=factory,
+                                chrome_ready=lambda: False,
+                            )
 
     def test_moli_process_creation_error_is_a_runtime_failure(self):
-        with tempfile.TemporaryDirectory() as folder, patch('browser_agent.runtime_paths', return_value=('missing-moli', 'fixture-module')), patch('browser_agent.subprocess.Popen', side_effect=FileNotFoundError(2, 'moli missing', 'moli')):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch('browser_agent.runtime_paths', return_value=('missing-moli', 'fixture-module')),
+            patch('browser_agent.subprocess.Popen', side_effect=FileNotFoundError(2, 'moli missing', 'moli')),
+        ):
             with self.assertRaises(browser_agent.BrowserRuntimeError):
                 browser_agent.Browser(folder)
 
     def test_model_failure_after_chrome_launch_fallback_still_propagates(self):
-        result, _, _ = self.site([fixtures.WEAK], [fixtures.GOOD], [ModelTransientError('503')], chrome_fail=browser_agent.BrowserRuntimeError('Chrome unavailable'))
+        result, _, _ = self.site(
+            [fixtures.WEAK],
+            [fixtures.GOOD],
+            [ModelTransientError('503')],
+            chrome_fail=browser_agent.BrowserRuntimeError('Chrome unavailable'),
+        )
         self.assertIsInstance(result, browser_agent.ModelTransientSiteError)
         self.assertTrue(result.partial['model_transient'])
         self.assertNotIn('_fallback', result.partial)

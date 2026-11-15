@@ -1,17 +1,48 @@
 """Isolated autonomous agent worker. Parent can stop the full browser process group."""
+
 import json
 import sys
-# Parent attaches the Windows Job before any browser or model can start.
-if '--parent-gate' in sys.argv[5:] and sys.stdin.readline().strip()!='ready':
-    raise SystemExit('Collection parent did not authorize startup')
-from browser_agent import run_site,AgentServiceError,ModelTransientSiteError,BrowserRuntimeError
 
-def emit(value):print(json.dumps(value,ensure_ascii=False),flush=True)
-if __name__=='__main__':
+# Parent attaches the Windows Job before any browser or model can start.
+if '--parent-gate' in sys.argv[5:] and sys.stdin.readline().strip() != 'ready':
+    raise SystemExit('Collection parent did not authorize startup')
+from browser_agent import run_site, AgentServiceError, ModelTransientSiteError, BrowserRuntimeError
+
+
+def emit(value):
+    print(json.dumps(value, ensure_ascii=False), flush=True)
+
+
+if __name__ == '__main__':
     try:
-        result=run_site(sys.argv[1],sys.argv[2],sys.argv[3],json.loads(sys.argv[4]),lambda message:emit({'kind':'log','message':message}))
-        emit({'kind':'result','data':result})
-    except AgentServiceError as error:emit({'kind':'error','message':str(error),'fatal':True,'partial':getattr(error,'partial',None)})
-    except ModelTransientSiteError as error:emit({'kind':'error','message':str(error),'fatal':False,'model_transient':True,'partial':error.partial})
-    except BrowserRuntimeError as error:emit({'kind':'error','message':str(error),'fatal':True,'runtime':True})
-    except Exception as error:emit({'kind':'error','message':str(error),'fatal':False})
+        result = run_site(
+            sys.argv[1],
+            sys.argv[2],
+            sys.argv[3],
+            json.loads(sys.argv[4]),
+            lambda message: emit({'kind': 'log', 'message': message}),
+        )
+        emit({'kind': 'result', 'data': result})
+    except AgentServiceError as error:
+        emit(
+            {
+                'kind': 'error',
+                'message': str(error),
+                'fatal': True,
+                'partial': getattr(error, 'partial', None),
+            }
+        )
+    except ModelTransientSiteError as error:
+        emit(
+            {
+                'kind': 'error',
+                'message': str(error),
+                'fatal': False,
+                'model_transient': True,
+                'partial': error.partial,
+            }
+        )
+    except BrowserRuntimeError as error:
+        emit({'kind': 'error', 'message': str(error), 'fatal': True, 'runtime': True})
+    except Exception as error:
+        emit({'kind': 'error', 'message': str(error), 'fatal': False})
