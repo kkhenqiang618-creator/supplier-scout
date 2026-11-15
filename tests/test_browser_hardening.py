@@ -183,7 +183,11 @@ class ReadTimeoutTests(unittest.TestCase):
         plain = '<html><body>欢迎访问</body></html>'
         results = [
             subprocess.run(
-                [node, '-e', script], capture_output=True, text=True, env={**os.environ, 'HTML': html}, check=True
+                [node, '-e', script],
+                capture_output=True,
+                text=True,
+                env={**os.environ, 'HTML': html},
+                check=True,
             ).stdout.strip()
             for html in (waf, plain)
         ]
