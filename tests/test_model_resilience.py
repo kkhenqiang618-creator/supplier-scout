@@ -126,7 +126,7 @@ class CollectSiteContractTests(unittest.TestCase):
         class Process:
             pid=0;stdout=io.StringIO(line+'\n')
             def poll(self):return 0
-        with patch('server.subprocess.Popen',return_value=Process()):
+        with patch('collection.subprocess.Popen',return_value=Process()):
             with self.assertRaises(server.ModelTransientSiteError) as raised:server.collect_site('https://example.com',lambda m:None,threading.Event(),'contacts')
         self.assertNotIsInstance(raised.exception,server.AgentServiceError);self.assertEqual(raised.exception.partial['contacts'],{'email':['a@example.com']})
 

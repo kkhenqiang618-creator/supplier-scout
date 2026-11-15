@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 from urllib.parse import urlsplit
 from cloud_store import PostgresStore, LostLease
 from model_service import ModelService, ModelConfigError, ModelTransientError, PHASE_TEXT, NETWORK_PHASES
-from server import collect_site, CollectionCancelled, AgentServiceError, BatchRuntimeError, ModelTransientSiteError, merge_contacts
+from collection import collect_site, CollectionCancelled, AgentServiceError, BatchRuntimeError, ModelTransientSiteError, merge_contacts
 from job_runner import MODEL_FAILURE_MESSAGE, run_batch
 
 HEARTBEAT_INTERVAL=5

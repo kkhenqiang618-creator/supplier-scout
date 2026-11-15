@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import server
+import local_store
 from server import Store, ModelTransientSiteError
 
 class LocalTransientTests(unittest.TestCase):
@@ -12,7 +13,7 @@ class LocalTransientTests(unittest.TestCase):
         store.model_service.save({'base_url':'https://example.com/v1','model':'fixture','api_key':'fixture-key'})
         return store
     def run_with(self,store,side_effect):
-        with patch.object(server,'collect_site',side_effect=side_effect),patch('browser_agent.runtime_paths',return_value=('moli','playwright')),patch.object(type(store.model_service),'public',return_value={'configured':True,'tested':True,'base_url':'x','model':'fixture'}):
+        with patch.object(local_store,'collect_site',side_effect=side_effect),patch('browser_agent.runtime_paths',return_value=('moli','playwright')),patch.object(type(store.model_service),'public',return_value={'configured':True,'tested':True,'base_url':'x','model':'fixture'}):
             store.start_job('real',scope='contacts');store.job_thread.join(timeout=5)
     def test_transient_site_keeps_partial_and_batch_continues(self):
         with tempfile.TemporaryDirectory() as folder:

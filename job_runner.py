@@ -4,7 +4,7 @@ Ordering, cancellation checks and the consecutive model-failure limit live here;
 persistence, progress reporting and job bookkeeping stay behind the target object,
 so the SQLite workspace and the Postgres-backed worker keep their own rules.
 """
-from server import CollectionCancelled,BatchRuntimeError,AgentServiceError,ModelTransientSiteError
+from collection import CollectionCancelled,BatchRuntimeError,AgentServiceError,ModelTransientSiteError
 
 MODEL_FAILURE_LIMIT=3
 MODEL_FAILURE_MESSAGE='模型服务连续 '+str(MODEL_FAILURE_LIMIT)+' 家不可用，批次已暂停；可稍后继续'

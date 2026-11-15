@@ -14,7 +14,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from cryptography.fernet import Fernet
 from model_service import ModelService
-from server import Store, encode, now, merge_sources, merge_contacts
+from collection import encode, now, merge_sources, merge_contacts
+from local_store import Store
 from rulebook import A_RULES
 
 WRITE_LOCK=732198461

@@ -343,7 +343,7 @@ class WiringTests(unittest.TestCase):
         for scope, elapsed, message in [('contacts', 481, '单站 Agent 超过 8 分钟'), ('all', 841, '单站 Agent 超过 14 分钟'), ('contacts', 479, '采集进程意外结束'), ('all', 839, '采集进程意外结束')]:
             with self.subTest(scope=scope, elapsed=elapsed):
                 reads = iter([0.0]); fake = types.SimpleNamespace(monotonic=lambda: next(reads, elapsed))
-                with patch('server.subprocess.Popen', return_value=Process()), patch('server.time', fake):
+                with patch('collection.subprocess.Popen', return_value=Process()), patch('collection.time', fake):
                     with self.assertRaisesRegex(ValueError, message): server.collect_site(URL, lambda m: None, threading.Event(), scope)
 
     def test_chrome_browser_always_uses_guard_proxy(self):

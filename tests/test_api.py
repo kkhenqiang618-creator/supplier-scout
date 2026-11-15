@@ -114,7 +114,7 @@ class ApiTests(unittest.TestCase):
         page=extract_page(html,'https://example.com/pricing')
         fixture={'contacts':page['contacts'],'offers':page['offers'],'sources':[{'url':page['source'],'excerpt':page['text']}],'warnings':[]}
         self.call('/api/import',{'rows':[{'url':'https://example.com'}]})
-        with patch('server.collect_site',return_value=fixture):
+        with patch('local_store.collect_site',return_value=fixture):
             self.assertEqual(self.call('/api/run',{'mode':'real'})[0],200)
             deadline=time.monotonic()+3
             while self.app.store.job['running'] and time.monotonic()<deadline: time.sleep(.01)

@@ -5,7 +5,7 @@ from http.server import ThreadingHTTPServer
 from urllib.parse import urlsplit,parse_qs
 from auth import AuthManager, AuthHandlerMixin
 from cloud_store import Database,PostgresStore,PostgresSessionStore,PostgresLoginLimiter
-from server import Handler
+from web_app import Handler
 
 _CONTEXT=None
 _LOCK=threading.Lock()

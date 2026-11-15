@@ -31,7 +31,7 @@ class RerunIntegrityTests(unittest.TestCase):
             with self.subTest(decision=decision):
                 self.store.review(self.sid,decision,'人工确认');row=self.store.get(self.sid)
                 self.store.job_lock.acquire();self.store.job.update(running=True,status='running',done=0)
-                with patch('server.collect_site',side_effect=ValueError('fixture timeout')):self.store.run_job([row],'real','all')
+                with patch('local_store.collect_site',side_effect=ValueError('fixture timeout')):self.store.run_job([row],'real','all')
                 row=self.store.get(self.sid)
                 self.assertEqual((row['status'],row['reason'],row['notes']),(decision,'人工复核：人工确认','人工确认'))
                 self.assertEqual(row['contact_status'],'needs_review')

@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import server
+import collection
 
 WORKER='''import json,subprocess,sys,time
 from pathlib import Path
@@ -28,7 +29,7 @@ class ProcessCleanupTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);(self.root/'collection_worker.py').write_text(WORKER)
         (self.root/'child.py').write_text("import time\nfrom pathlib import Path\np=Path(__file__).with_name('heartbeat')\nwhile True:\n p.write_text(str(time.time()))\n time.sleep(.05)\n")
-        self.root_patch=patch.object(server,'ROOT',self.root);self.root_patch.start();self.addCleanup(self.root_patch.stop)
+        self.root_patch=patch.object(collection,'ROOT',self.root);self.root_patch.start();self.addCleanup(self.root_patch.stop)
     def test_result_is_preserved_with_original_blocked_status(self):
         result=server.collect_site('result',lambda _:None,threading.Event())
         self.assertEqual(result,{'contact_status':'blocked','contacts':{}})
@@ -38,7 +39,7 @@ class ProcessCleanupTests(unittest.TestCase):
         def launch(*args,**kwargs):
             process=popen(*args,**kwargs);children.append(process);return process
         try:
-            with patch.object(server.subprocess,'Popen',side_effect=launch),patch.object(server.os,'killpg',side_effect=OSError('fixture denied')):
+            with patch.object(collection.subprocess,'Popen',side_effect=launch),patch.object(collection.os,'killpg',side_effect=OSError('fixture denied')):
                 logs=[];started=time.monotonic();result=server.collect_site('result',logs.append,threading.Event())
                 self.assertLess(time.monotonic()-started,3,'stdout close must not wait for a stuck reader')
             self.assertEqual(result['contact_status'],'blocked')
