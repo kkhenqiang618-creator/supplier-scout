@@ -14,6 +14,8 @@ from entry_recovery import validate_entry_url, canonical_url
 from importers import parse_file, parse_text, prepare_rows
 from model_service import ModelService
 
+LOCAL_SCHEMA_VERSION=1
+
 class Store:
     def __init__(self,path,seed=True):
         self.path=str(path); self.model_service=ModelService(Path(path).with_name('model-service.json')); self.lock=threading.RLock(); self.job_lock=threading.Lock(); self.stop_event=threading.Event(); self.job={'status':'idle','stopping':False,'stage':'','running':False,'total':0,'done':0,'mode':'demo','current':''}
@@ -25,9 +27,13 @@ class Store:
             CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY,supplier_id INTEGER,mode TEXT,offers TEXT,created_at TEXT);
             CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY,supplier_id INTEGER UNIQUE,subject TEXT,body TEXT,created_at TEXT);
             ''')
-            columns={r[1] for r in db.execute('PRAGMA table_info(suppliers)')}
-            for column,definition in [('contact_status',"TEXT NOT NULL DEFAULT 'not_started'"),('contact_checked_at','TEXT'),('contact_result',"TEXT NOT NULL DEFAULT '{}' ")]:
-                if column not in columns: db.execute('ALTER TABLE suppliers ADD COLUMN '+column+' '+definition)
+            version=db.execute('PRAGMA user_version').fetchone()[0]
+            if version>LOCAL_SCHEMA_VERSION: raise RuntimeError('工作区数据库版本比程序新（%d > %d），请先更新程序' % (version,LOCAL_SCHEMA_VERSION))
+            if version<LOCAL_SCHEMA_VERSION:
+                columns={r[1] for r in db.execute('PRAGMA table_info(suppliers)')}
+                for column,definition in [('contact_status',"TEXT NOT NULL DEFAULT 'not_started'"),('contact_checked_at','TEXT'),('contact_result',"TEXT NOT NULL DEFAULT '{}' ")]:
+                    if column not in columns: db.execute('ALTER TABLE suppliers ADD COLUMN '+column+' '+definition)
+                db.execute('PRAGMA user_version=%d' % LOCAL_SCHEMA_VERSION)
             for row in db.execute("SELECT id,contacts FROM suppliers WHERE contact_status='not_started'").fetchall():
                 if any(json.loads(row['contacts']).values()): db.execute("UPDATE suppliers SET contact_status='legacy' WHERE id=?",(row['id'],))
             db.execute('INSERT OR IGNORE INTO settings VALUES(?,?)',('rules',encode(DEFAULT_RULES)))

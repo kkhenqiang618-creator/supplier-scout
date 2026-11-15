@@ -1,5 +1,8 @@
 import unittest
-from cloud_store import SQL, adapt_placeholders
+from datetime import datetime, timezone
+from psycopg.types.json import Jsonb
+from collection import encode, now
+from cloud_store import SQL, adapt_placeholders, adapt_value
 
 
 class FakeCursor:
@@ -44,6 +47,36 @@ class StatementShapeTests(unittest.TestCase):
         connection=FakeConnection()
         SQL(connection).execute("INSERT INTO events(kind,payload) VALUES(?,?)",('x','{}'))
         self.assertEqual(connection.seen[0],'INSERT INTO events(kind,payload) VALUES(%s,%s)')
+
+
+class ParameterBindingTests(unittest.TestCase):
+    def test_json_documents_bind_as_jsonb_for_jsonb_tables(self):
+        connection=FakeConnection()
+        SQL(connection).execute('UPDATE suppliers SET contacts=? WHERE id=?',(encode({'email':'a@b'}),1))
+        bound=connection.seen[1]
+        self.assertIsInstance(bound[0],Jsonb)
+        self.assertEqual(bound[0].obj,{'email':'a@b'})
+        self.assertEqual(bound[1],1)
+
+    def test_json_kept_as_text_for_text_columns(self):
+        connection=FakeConnection()
+        SQL(connection).execute('UPDATE settings SET value=? WHERE key=?',(encode({'a':1}),'rules'))
+        bound=connection.seen[1]
+        self.assertIsInstance(bound[0],str)
+        self.assertNotIsInstance(bound[0],Jsonb)
+
+    def test_iso_timestamps_bind_as_datetime(self):
+        connection=FakeConnection()
+        stamp=now()
+        SQL(connection).execute('UPDATE suppliers SET checked_at=? WHERE id=?',(stamp,1))
+        bound=connection.seen[1][0]
+        self.assertIsInstance(bound,datetime)
+        self.assertEqual(bound,datetime.fromisoformat(stamp))
+
+    def test_postgres_values_read_back_as_text(self):
+        self.assertEqual(adapt_value({'a':[1,2]}),'{"a": [1, 2]}')
+        self.assertEqual(adapt_value(datetime(2026,1,2,3,4,5,tzinfo=timezone.utc)),'2026-01-02T03:04:05+00:00')
+        self.assertEqual(adapt_value(7),7)
 
 
 if __name__=='__main__':unittest.main()

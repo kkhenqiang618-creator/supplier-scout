@@ -14,7 +14,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from cryptography.fernet import Fernet
 from model_service import ModelService
-from collection import encode, now, merge_sources, merge_contacts
+from datetime import datetime
+from collection import encode, now, merge_sources, merge_contacts, JsonText, TimestampText
 from local_store import Store
 from rulebook import A_RULES
 
@@ -30,13 +31,21 @@ class LostLease(RuntimeError):pass
 class Row(dict):
     def __getitem__(self,key):return list(self.values())[key] if isinstance(key,int) else super().__getitem__(key)
 
+def adapt_value(value):
+    """Return Postgres values in the text shapes the SQLite-first store expects."""
+    if isinstance(value,(dict,list)):return JsonText(json.dumps(value,ensure_ascii=False,allow_nan=False))
+    if isinstance(value,datetime):return TimestampText(value.isoformat())
+    return value
+
+def adapt_row(row):return {key:adapt_value(value) for key,value in row.items()}
+
 class Cursor:
     def __init__(self,cursor,lastrowid=None):self.cursor=cursor;self.lastrowid=lastrowid
     @property
     def rowcount(self):return self.cursor.rowcount
     def fetchone(self):
-        row=self.cursor.fetchone();return Row(row) if row is not None else None
-    def fetchall(self):return [Row(row) for row in self.cursor.fetchall()]
+        row=self.cursor.fetchone();return Row(adapt_row(row)) if row is not None else None
+    def fetchall(self):return [Row(adapt_row(row)) for row in self.cursor.fetchall()]
     def __iter__(self):return iter(self.fetchall())
 
 def adapt_placeholders(statement):
@@ -73,6 +82,8 @@ class SQL:
         statement=statement.strip();ignore=bool(re.match(r'INSERT OR IGNORE',statement,re.I))
         statement=re.sub(r'^INSERT OR IGNORE','INSERT',statement,flags=re.I)
         statement=adapt_placeholders(statement)
+        jsonb_target=bool(re.search(r'(?i)\b(?:insert\s+into|update)\s+(?:scout_private\.)?(suppliers|history)\b',statement))
+        parameters=tuple(Jsonb(json.loads(p)) if jsonb_target and isinstance(p,JsonText) else datetime.fromisoformat(p) if isinstance(p,TimestampText) else p for p in parameters)
         if ignore:statement+=' ON CONFLICT DO NOTHING'
         returning=bool(re.match(r'INSERT INTO suppliers\b',statement,re.I)) and 'RETURNING' not in statement.upper()
         if returning:statement+=' RETURNING id'

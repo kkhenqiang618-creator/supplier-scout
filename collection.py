@@ -14,8 +14,13 @@ from browser_agent import AgentServiceError, ModelTransientSiteError
 
 ROOT=Path(__file__).resolve().parent
 
-def now(): return datetime.now(timezone.utc).isoformat(timespec='seconds')
-def encode(value): return json.dumps(value,ensure_ascii=False,allow_nan=False)
+class JsonText(str):
+    """A JSON document stored as text; the Postgres adapter binds it as jsonb."""
+class TimestampText(str):
+    """An ISO-8601 timestamp stored as text; the Postgres adapter binds it as timestamptz."""
+
+def now(): return TimestampText(datetime.now(timezone.utc).isoformat(timespec='seconds'))
+def encode(value): return JsonText(json.dumps(value,ensure_ascii=False,allow_nan=False))
 
 def log_exception(where):
     """Keep the stack trace server-side; clients only get a generic 500 message."""
