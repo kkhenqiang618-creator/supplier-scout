@@ -59,7 +59,7 @@ class MainDomainTests(unittest.TestCase):
 
 
 class RunSiteFallbackTests(unittest.TestCase):
-    def run_site(self, primary, extra, url='https://api.example.com/'):
+    def run_site(self, primary, extra, url='https://api.example.com/', now=0.0, scope='contacts'):
         calls = []
 
         def fake_run_agent(alt, scope, service, rules, log, **kwargs):
@@ -68,12 +68,54 @@ class RunSiteFallbackTests(unittest.TestCase):
                 raise extra
             return extra
 
+        class FakeClock:
+            """First call: run_site starts; later calls: the first pass already took `now` seconds."""
+
+            def __init__(self):
+                self.queue = [0.0, now]
+
+            def __call__(self):
+                return self.queue.pop(0) if self.queue else now
+
         with (
             mock.patch.object(browser_agent, '_run_site', return_value=primary),
             mock.patch.object(browser_agent, 'run_agent', side_effect=fake_run_agent),
         ):
-            merged = browser_agent.run_site(url, 'contacts', None, [], log=lambda message: None)
+            merged = browser_agent.run_site(url, scope, None, [], log=lambda message: None, clock=FakeClock())
         return merged, calls
+
+    def test_second_run_deadline_stays_inside_the_hard_timeout(self):
+        _, calls = self.run_site(result(), result(), now=20.0)
+        self.assertEqual(len(calls), 1)
+        # contacts hard timeout 480 - worst tail 275 - 15 slack = 190 absolute.
+        self.assertEqual(calls[0][2]['deadline'], 190.0)
+
+    def test_second_run_is_skipped_when_the_first_pass_used_the_budget(self):
+        merged, calls = self.run_site(result(), result(), now=450.0)
+        self.assertEqual(calls, [])
+        self.assertTrue(any('剩余时间不足' in warning for warning in merged['warnings']))
+
+    def test_second_run_without_contacts_keeps_the_original_outcome(self):
+        primary = result(status='blocked')
+        primary['contact_summary'] = '首页要求登录后才能查看'
+        extra = result(
+            sources=[
+                {'url': 'https://www.example.com/', 'method': 'Moli', 'excerpt': '登录', 'text_length': 2}
+            ]
+        )
+        merged, calls = self.run_site(primary, extra)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(merged['contact_status'], 'blocked')
+        self.assertEqual(merged['contact_summary'], '首页要求登录后才能查看')
+        self.assertEqual(merged['contact_records'], [])
+        self.assertTrue(any('未发现联系方式' in warning for warning in merged['warnings']))
+
+    def test_model_outage_skips_the_second_run(self):
+        primary = result()
+        primary['model_transient'] = True
+        merged, calls = self.run_site(primary, ValueError('must not be called'))
+        self.assertEqual(calls, [])
+        self.assertEqual(merged, primary)
 
     def test_no_contacts_triggers_one_same_domain_run(self):
         merged, calls = self.run_site(
