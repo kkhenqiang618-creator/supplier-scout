@@ -2111,14 +2111,18 @@ def run_site(
     if not alt:
         return result
     # The subprocess that runs us has a hard timeout and throws the whole site away when it hits.
-    # The first pass already spent part of it, so the second pass only gets what is left, minus the
-    # worst-case tail (browser close, robots fetch, one slow step) and a little startup slack.
+    # run_agent only starts a step while at least `reserve` seconds are left, so the last step may
+    # start at deadline - reserve and still take a worst-case tail of WORST_TAIL. Same formula the
+    # budgets above use (E - reserve + WORST_TAIL <= hard): the second pass runs at contacts scope,
+    # so contacts reserve 110 applies in both modes and the cap is hard - 275 + 110 = contacts 310,
+    # full 670. The 5s keeps the subprocess start inside the hard timeout.
     from collection import SITE_HARD_TIMEOUT
 
     now = clock()
-    cap = start + SITE_HARD_TIMEOUT[scope] - WORST_TAIL - 15
+    reserve = site_budget('contacts')['reserve']
+    cap = start + SITE_HARD_TIMEOUT[scope] - WORST_TAIL + reserve - 5
     deadline = min(now + 180, cap)
-    needed = site_budget('contacts')['reserve'] + BROWSER_STARTUP
+    needed = reserve + BROWSER_STARTUP
     if deadline - now < needed:
         result['warnings'].append('原网址未找到联系方式，剩余时间不足，未检查同主域官网')
         return result

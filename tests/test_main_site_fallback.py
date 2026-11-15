@@ -85,13 +85,19 @@ class RunSiteFallbackTests(unittest.TestCase):
         return merged, calls
 
     def test_second_run_deadline_stays_inside_the_hard_timeout(self):
-        _, calls = self.run_site(result(), result(), now=20.0)
+        _, calls = self.run_site(result(), result(), now=140.0)
         self.assertEqual(len(calls), 1)
-        # contacts hard timeout 480 - worst tail 275 - 15 slack = 190 absolute.
-        self.assertEqual(calls[0][2]['deadline'], 190.0)
+        # contacts hard timeout 480 - worst tail 275 + reserve 110 - 5 slack = 310 absolute.
+        self.assertEqual(calls[0][2]['deadline'], 310.0)
+
+    def test_second_run_still_happens_after_a_long_first_pass(self):
+        merged, calls = self.run_site(result(), result(), now=100.0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2]['deadline'], 280.0)
+        self.assertFalse(any('剩余时间不足' in warning for warning in merged['warnings']))
 
     def test_second_run_is_skipped_when_the_first_pass_used_the_budget(self):
-        merged, calls = self.run_site(result(), result(), now=450.0)
+        merged, calls = self.run_site(result(), result(), now=400.0)
         self.assertEqual(calls, [])
         self.assertTrue(any('剩余时间不足' in warning for warning in merged['warnings']))
 
