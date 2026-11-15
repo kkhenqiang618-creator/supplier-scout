@@ -195,6 +195,7 @@ class CloudBatchTarget:
         return not self.stop.is_set()
 
     def log(self, message, row=None):
+        # Step logs only update progress; batch-level job_log also writes an event.
         if self.stop.is_set():
             return
         try:
@@ -202,11 +203,7 @@ class CloudBatchTarget:
         except LostLease:
             raise
         except Exception:
-            pass
-        try:
-            self.store.event(message, mode=self.job['mode'])
-        except Exception:
-            pass  # Events are best-effort; the scoped store keeps them in the owner's log.
+            pass  # Step logs are best-effort; the heartbeat thread decides lease loss.
 
     def start_site(self, row):
         self.log('准备云端访问 ' + row['url'], row)

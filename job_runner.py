@@ -81,8 +81,8 @@ def run_batch(rows, mode, scope, target, start=0, fatal=()):
                 target.model_failures_exhausted()
                 return True
         except AgentServiceError as error:
-            if not target.active():
-                raise CollectionCancelled()
+            # Each target keeps its old stop behaviour: the local one stops first,
+            # the cloud one still saves the contacts found so far.
             target.save_agent_failure(row, error, scope, index)
             return True
         except Exception as error:

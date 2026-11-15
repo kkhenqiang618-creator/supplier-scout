@@ -28,6 +28,17 @@ class LocalTransientTests(unittest.TestCase):
             store.start_job('real', scope='contacts')
             store.job_thread.join(timeout=5)
 
+    def test_agent_error_while_stopping_does_not_save_the_partial_site(self):
+        from server import AgentServiceError
+
+        with tempfile.TemporaryDirectory() as folder:
+            store = self.make(folder, 1)
+            store.stop_event.set()
+            target = local_store.LocalBatchTarget(store, 'real')
+            with self.assertRaises(local_store.CollectionCancelled):
+                target.save_agent_failure(store.get(1), AgentServiceError('模型服务失败'), 'contacts', 0)
+            self.assertEqual(store.state()['suppliers'][0]['contact_status'], 'not_started')
+
     def test_transient_site_keeps_partial_and_batch_continues(self):
         with tempfile.TemporaryDirectory() as folder:
             store = self.make(folder, 2)

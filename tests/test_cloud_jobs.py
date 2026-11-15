@@ -212,6 +212,51 @@ class CloudJobResilienceTests(unittest.TestCase):
         self.assertEqual(store.writes, [])
         store.finish_job.assert_called_once_with('job', 'lease', 'failed', 'API Key 无效')
 
+    def test_site_step_logs_only_update_progress(self):
+        import cloud_worker
+
+        store = self.worker_store(1)
+
+        def collect(url, log, stop, scope, path, rules):
+            log('步骤：读取公告')
+            return self.ok()
+
+        job = {
+            'id': 'job',
+            'position': 0,
+            'supplier_ids': [1],
+            'mode': 'real',
+            'scope': 'contacts',
+            'state': {'_model_config': 'x'},
+        }
+        with patch.object(cloud_worker, 'collect_site', side_effect=collect):
+            cloud_worker.execute_job(store, job, 'lease', threading.Event())
+        self.assertEqual(store.progress.call_args_list[-1].args[2], '步骤：读取公告')
+        store.event.assert_not_called()
+
+    def test_agent_error_while_stopping_still_saves_partial_contacts(self):
+        import cloud_worker
+        import job_runner
+        from server import AgentServiceError
+
+        store = self.worker_store(1)
+        stop = threading.Event()
+        row = {'id': 1, 'name': 's1', 'url': 'https://s1.example.com'}
+        job = {'id': 'job', 'mode': 'real', 'scope': 'contacts', 'state': {}, 'position': 0}
+
+        class Target(cloud_worker.CloudBatchTarget):
+            def collect(self, row, mode, scope):
+                stop.set()  # The operator stopped the batch while this site was running.
+                error = AgentServiceError('模型服务失败')
+                error.partial = {'contacts': {'email': ['a@example.com']}, 'sources': []}
+                raise error
+
+        target = Target(store, job, 'lease', stop)
+        self.assertTrue(job_runner.run_batch([row], 'real', 'contacts', target, start=0))
+        store.save_contacts.assert_called_once()
+        self.assertEqual(store.save_contacts.call_args.args[0], 1)
+        store.finish_job.assert_called_once_with('job', 'lease', 'failed', '模型服务失败')
+
     def test_step_log_failures_are_best_effort(self):
         store = self.worker_store(1)
         store.progress.side_effect = RuntimeError('db blip')
