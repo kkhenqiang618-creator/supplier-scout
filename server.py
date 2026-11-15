@@ -451,61 +451,12 @@ class Store:
                 self.stop_event.set(); self.job.update(stopping=True,status='stopping',stage='正在停止当前请求，保留已完成结果')
             return dict(self.job)
     def run_job(self,rows,mode,scope='all'):
+        from job_runner import run_batch
         try:
             self.event(('演示回放' if mode=='demo' else '仅联系方式 Agent' if scope=='contacts' else '全量浏览器 Agent')+'开始：'+str(len(rows))+' 家',mode=mode)
-            model_failures=0
-            for row in rows:
-                if self.stop_event.is_set(): break
-                self.job.update(current=row['name'],stage='准备访问 '+row['url'])
-                def progress(message):
-                    if self.stop_event.is_set(): return
-                    self.job['stage']=message
-                    self.event(message,row['id'],mode)
-                try:
-                    if mode=='demo':
-                        if self.stop_event.wait(.35): raise CollectionCancelled()
-                        result={k:row[k] for k in ['contacts','offers','sources','warnings']}
-                    else: result=collect_site(row['url'],progress,self.stop_event,scope,self.model_service.path,self.rules() if scope=='all' else [])
-                    with self.lock:
-                        if self.stop_event.is_set(): raise CollectionCancelled()
-                        if scope=='all':
-                            prior=self.get(row['id'])
-                            self.save_result(row['id'],dict(result,contacts=merge_contacts(prior['contacts'],result.get('contacts')),sources=prior['sources']+result.get('sources',[])))
-                        self.save_contacts(row['id'],result)
-                        self.job['done']+=1
-                    model_failures=0
-                except CollectionCancelled: break
-                except BatchRuntimeError as e:
-                    if self.stop_event.is_set(): break
-                    self.job.update(status='failed',error=str(e),stage='浏览器运行环境异常，批次已停止')
-                    self.event('批次因浏览器运行环境异常停止：'+str(e)[:500],mode=mode)
-                    break
-                except ModelTransientSiteError as e:
-                    with self.lock:
-                        if self.stop_event.is_set(): break
-                        partial=dict(e.partial or {});found=any((partial.get('contacts') or {}).values())
-                        self.save_contacts(row['id'],dict(partial,contacts=partial.get('contacts') or {},sources=partial.get('sources') or [],warnings=list(dict.fromkeys((partial.get('warnings') or [])+[str(e)[:400]])),contact_status='incomplete' if found else 'blocked',contact_summary='模型服务暂时不可用，本站稍后重试',scope=scope))
-                        self.event('模型服务暂时不可用，跳过 '+row['name']+'：'+str(e)[:300],row['id'],mode)
-                        self.job['done']+=1
-                    model_failures+=1
-                    if model_failures>=3:
-                        self.job.update(status='failed',error=str(e),stage='模型服务连续 3 家不可用，批次已暂停；可稍后继续')
-                        self.event('模型服务连续 3 家不可用，批次已暂停；可稍后继续',mode=mode)
-                        break
-                except AgentServiceError as e:
-                    if self.stop_event.is_set():break
-                    self.save_contacts(row['id'],e.partial or {'contact_status':'blocked','contact_summary':'模型服务调用失败，已停止批次，请检查 API 配置','warnings':[str(e)],'contacts':{},'sources':[],'steps':[],'scope':scope})
-                    self.job.update(status='failed',error=str(e),stage='模型服务不可用，批次已停止')
-                    self.event('Agent 批次因模型服务错误停止：'+str(e)[:500],row['id'],mode)
-                    break
-                except Exception as e:
-                    with self.lock:
-                        if self.stop_event.is_set(): break
-                        if scope=='all' and not manual_decision(self.get(row['id'])):
-                            with self.connect() as db: db.execute('UPDATE suppliers SET status="error",reason=?,checked_at=? WHERE id=?',(str(e)[:1500],now(),row['id']))
-                        self.save_contacts(row['id'],{'contact_status':'blocked','contact_summary':str(e)[:500],'contacts':{},'sources':[],'warnings':[str(e)],'scope':scope})
-                        self.event('采集失败 '+row['name']+'：'+str(e)[:500],row['id'],mode)
-                        self.job['done']+=1
+            try:
+                run_batch(rows,mode,scope,LocalBatchTarget(self,mode))
+            except CollectionCancelled:self.job['status']='stopped'
             stopped=self.stop_event.is_set()
             if self.job['status']!='failed':self.job['status']='stopped' if stopped else 'completed'
             self.event(('批次因模型服务失败结束' if self.job['status']=='failed' else '批次已停止' if stopped else '批次完成')+'：已处理 '+str(self.job['done'])+' / '+str(len(rows))+' 家；已完成结果保留',mode=mode)
@@ -514,6 +465,65 @@ class Store:
                 terminal='failed' if self.job['status']=='failed' else 'stopped' if self.stop_event.is_set() else 'completed'
                 self.job.update(status=terminal,running=False,stopping=False,current='',stage='模型服务失败，已停止' if terminal=='failed' else '已停止' if terminal=='stopped' else '已完成')
             self.job_lock.release()
+
+class LocalBatchTarget:
+    """Persist one local batch run; implements the job_runner.BatchTarget hooks."""
+    def __init__(self,store,mode):
+        self.store=store
+        self.mode=mode
+    def active(self):
+        return not self.store.stop_event.is_set()
+    def start_site(self,row):
+        self.store.job.update(current=row['name'],stage='准备访问 '+row['url'])
+    def collect(self,row,mode,scope):
+        store=self.store
+        if mode=='demo':
+            if store.stop_event.wait(.35):raise CollectionCancelled()
+            return {k:row[k] for k in ['contacts','offers','sources','warnings']}
+        def progress(message):
+            if store.stop_event.is_set():return
+            store.job['stage']=message
+            store.event(message,row['id'],mode)
+        return collect_site(row['url'],progress,store.stop_event,scope,store.model_service.path,store.rules() if scope=='all' else [])
+    def save_success(self,row,result,scope,index):
+        store=self.store
+        with store.lock:
+            if store.stop_event.is_set():raise CollectionCancelled()
+            if scope=='all':
+                prior=store.get(row['id'])
+                store.save_result(row['id'],dict(result,contacts=merge_contacts(prior['contacts'],result.get('contacts')),sources=prior['sources']+result.get('sources',[])))
+            store.save_contacts(row['id'],result)
+            store.job['done']+=1
+    def save_model_transient(self,row,error,scope,index):
+        store=self.store
+        with store.lock:
+            if store.stop_event.is_set():raise CollectionCancelled()
+            partial=dict(error.partial or {});found=any((partial.get('contacts') or {}).values())
+            store.save_contacts(row['id'],dict(partial,contacts=partial.get('contacts') or {},sources=partial.get('sources') or [],warnings=list(dict.fromkeys((partial.get('warnings') or [])+[str(error)[:400]])),contact_status='incomplete' if found else 'blocked',contact_summary='模型服务暂时不可用，本站稍后重试',scope=scope))
+            store.event('模型服务暂时不可用，跳过 '+row['name']+'：'+str(error)[:300],row['id'],self.mode)
+            store.job['done']+=1
+    def save_agent_failure(self,row,error,scope,index):
+        store=self.store
+        if not self.active():raise CollectionCancelled()
+        store.save_contacts(row['id'],error.partial or {'contact_status':'blocked','contact_summary':'模型服务调用失败，已停止批次，请检查 API 配置','warnings':[str(error)],'contacts':{},'sources':[],'steps':[],'scope':scope})
+        store.job.update(status='failed',error=str(error),stage='模型服务不可用，批次已停止')
+        store.event('Agent 批次因模型服务错误停止：'+str(error)[:500],row['id'],self.mode)
+    def save_site_failure(self,row,error,scope,index):
+        store=self.store
+        with store.lock:
+            if store.stop_event.is_set():raise CollectionCancelled()
+            if scope=='all' and not manual_decision(store.get(row['id'])):
+                with store.connect() as db:db.execute('UPDATE suppliers SET status="error",reason=?,checked_at=? WHERE id=?',(str(error)[:1500],now(),row['id']))
+            store.save_contacts(row['id'],{'contact_status':'blocked','contact_summary':str(error)[:500],'contacts':{},'sources':[],'warnings':[str(error)],'scope':scope})
+            store.event('采集失败 '+row['name']+'：'+str(error)[:500],row['id'],self.mode)
+            store.job['done']+=1
+    def batch_failed(self,error):
+        self.store.job.update(status='failed',error=str(error),stage='浏览器运行环境异常，批次已停止')
+        self.store.event('批次因浏览器运行环境异常停止：'+str(error)[:500],mode=self.mode)
+    def model_failures_exhausted(self):
+        from job_runner import MODEL_FAILURE_MESSAGE
+        self.store.job.update(status='failed',error=MODEL_FAILURE_MESSAGE,stage=MODEL_FAILURE_MESSAGE)
+        self.store.event(MODEL_FAILURE_MESSAGE,mode=self.mode)
 
 def draft_content(row):
     models='、'.join(sorted(set(o['model'] for o in row['offers']))) or '贵司支持的大模型 API'

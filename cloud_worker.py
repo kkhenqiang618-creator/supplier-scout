@@ -11,8 +11,8 @@ from urllib.parse import urlsplit
 from cloud_store import PostgresStore, LostLease
 from model_service import ModelService, ModelConfigError, ModelTransientError, PHASE_TEXT, NETWORK_PHASES
 from server import collect_site, CollectionCancelled, AgentServiceError, BatchRuntimeError, ModelTransientSiteError, merge_contacts
+from job_runner import MODEL_FAILURE_MESSAGE, run_batch
 
-MODEL_FAILURE_LIMIT=3
 HEARTBEAT_INTERVAL=5
 HEARTBEAT_GRACE=35
 PROXY_VARS=['HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','https_proxy','http_proxy','all_proxy']
@@ -83,6 +83,72 @@ def self_check_once(store,job,owner,log,stop=None):
             log('云端自检：60KB 请求 上传成功，模型返回异常，已忽略')  # Any HTTP reply or reply-wait timeout proves the upload got through.
     return None
 
+class CloudBatchTarget:
+    """Persist one cloud job run; implements the job_runner.BatchTarget hooks."""
+    def __init__(self,store,job,owner,stop):
+        self.store=store
+        self.job=job
+        self.owner=owner
+        self.stop=stop
+    def active(self):
+        return not self.stop.is_set()
+    def log(self,message,row=None):
+        if self.stop.is_set():return
+        try:self.store.progress(self.job['id'],self.owner,message,row['name'] if row else '')
+        except LostLease:raise
+        except Exception:pass
+        try:self.store.event(message,mode=self.job['mode'])
+        except Exception:pass  # Events are best-effort; the scoped store keeps them in the owner's log.
+    def start_site(self,row):
+        self.log('准备云端访问 '+row['url'],row)
+    def collect(self,row,mode,scope):
+        if mode=='demo':
+            if self.stop.wait(.35):raise CollectionCancelled()
+            return {key:row[key] for key in ['contacts','offers','sources','warnings']}
+        with tempfile.TemporaryDirectory(prefix='scout-provider-') as folder:
+            config=self.store.model_service.materialize(folder,snapshot=self.job['state'].get('_model_config',''))
+            return collect_site(row['url'],lambda message:self.log(message,row),self.stop,scope,config,self.store.rules() if scope=='all' else [])
+    def fenced(self):
+        return self.store.fenced(self.job['id'],self.owner)
+    def advance(self,db,index):
+        db.execute('UPDATE cloud_jobs SET position=?,updated_at=now() WHERE id=?',(index+1,self.job['id']))
+    def save_success(self,row,result,scope,index):
+        with self.fenced() as (db,current):
+            if current['cancel_requested'] or self.stop.is_set():raise CollectionCancelled()
+            if scope=='all':
+                prior=self.store.get(row['id'])
+                self.store.save_result(row['id'],dict(result,contacts=merge_contacts(prior['contacts'],result.get('contacts')),sources=prior['sources']+result.get('sources',[])))
+            self.store.save_contacts(row['id'],result)
+            self.advance(db,index)
+    def save_model_transient(self,row,error,scope,index):
+        with self.fenced() as (db,current):
+            if current['cancel_requested'] or self.stop.is_set():raise CollectionCancelled()
+            partial=dict(error.partial or {});found=any((partial.get('contacts') or {}).values())
+            # Contacts-only save keeps checked_at/status untouched; never 'found', so contacts-scope '继续未完成' still selects this site, ordered after untried ones.
+            self.store.save_contacts(row['id'],dict(partial,contacts=partial.get('contacts') or {},sources=partial.get('sources') or [],warnings=list(dict.fromkeys((partial.get('warnings') or [])+[str(error)[:400]])),contact_status='incomplete' if found else 'blocked',contact_summary='模型服务暂时不可用，本站稍后重试',scope=scope))
+            self.advance(db,index)
+    def save_agent_failure(self,row,error,scope,index):
+        with self.fenced() as (db,current):
+            self.store.save_contacts(row['id'],error.partial or {'contacts':{},'sources':[],'warnings':[str(error)],'contact_status':'blocked','contact_summary':'模型服务失败，批次已停止','scope':scope})
+            self.store.finish_job(self.job['id'],self.owner,'failed',str(error))
+    def save_site_failure(self,row,error,scope,index):
+        with self.fenced() as (db,current):
+            if current['cancel_requested'] or self.stop.is_set():raise CollectionCancelled()
+            self.store.save_contacts(row['id'],{'contacts':{},'sources':[],'warnings':[str(error)[:500]],'contact_status':'blocked','contact_summary':str(error)[:500],'scope':scope})
+            self.advance(db,index)
+    def batch_failed(self,error):
+        self.store.finish_job(self.job['id'],self.owner,'failed',str(error)[:400])  # Environment problem: do not touch any supplier row.
+    def model_failures_exhausted(self):
+        self.store.finish_job(self.job['id'],self.owner,'failed',MODEL_FAILURE_MESSAGE)
+
+
+def job_rows(store,job,owner,shutdown):
+    """Yield the unprocessed suppliers, checking for cancellation between sites."""
+    for supplier_id in job['supplier_ids'][job['position']:]:
+        with store.fenced(job['id'],owner) as (db,current):
+            if current['cancel_requested'] or shutdown.is_set():raise CollectionCancelled()
+        yield store.get(supplier_id)
+
 
 def execute_job(store,job,owner,shutdown):
     stop=threading.Event();lost=threading.Event();finished=threading.Event()
@@ -97,7 +163,7 @@ def execute_job(store,job,owner,shutdown):
                 # Transient DB/network error: retry next tick; grace counts from the last successful renewal so we stop before the 45s lease lapses.
                 if time.monotonic()-last_ok>=HEARTBEAT_GRACE:lost.set();stop.set();return
     heartbeat=threading.Thread(target=renew,daemon=True);heartbeat.start()
-    model_failures=0
+    target=CloudBatchTarget(store,job,owner,stop)
     def job_log(message):
         if stop.is_set():return
         try:store.progress(job['id'],owner,message,'')
@@ -114,58 +180,8 @@ def execute_job(store,job,owner,shutdown):
                 if current['cancel_requested'] or stop.is_set():raise CollectionCancelled()
             if failure:
                 store.finish_job(job['id'],owner,'failed',failure[1]);return
-        for index in range(job['position'],len(job['supplier_ids'])):
-            with store.fenced(job['id'],owner) as (db,current):
-                if current['cancel_requested'] or shutdown.is_set():raise CollectionCancelled()
-            row=store.get(job['supplier_ids'][index])
-            def log(message):
-                if stop.is_set():return
-                try:store.progress(job['id'],owner,message,row['name'])
-                except LostLease:raise
-                except Exception:pass  # Step logs are best-effort; the heartbeat thread decides lease loss.
-            log('准备云端访问 '+row['url'])
-            try:
-                if job['mode']=='demo':
-                    if stop.wait(.35):raise CollectionCancelled()
-                    result={key:row[key] for key in ['contacts','offers','sources','warnings']}
-                else:
-                    with tempfile.TemporaryDirectory(prefix='scout-provider-') as folder:
-                        config=store.model_service.materialize(folder,snapshot=job['state'].get('_model_config',''))
-                        result=collect_site(row['url'],log,stop,job['scope'],config,store.rules() if job['scope']=='all' else [])
-                with store.fenced(job['id'],owner) as (db,current):
-                    if current['cancel_requested'] or stop.is_set():raise CollectionCancelled()
-                    if job['scope']=='all':
-                        prior=store.get(row['id'])
-                        store.save_result(row['id'],dict(result,contacts=merge_contacts(prior['contacts'],result.get('contacts')),sources=prior['sources']+result.get('sources',[])))
-                    store.save_contacts(row['id'],result)
-                    db.execute('UPDATE cloud_jobs SET position=?,updated_at=now() WHERE id=?',(index+1,job['id']))
-                model_failures=0
-            except BatchRuntimeError as error:
-                store.finish_job(job['id'],owner,'failed',str(error)[:400]);return  # Environment problem: do not touch any supplier row.
-            except ModelTransientSiteError as error:
-                with store.fenced(job['id'],owner) as (db,current):
-                    if current['cancel_requested'] or stop.is_set():raise CollectionCancelled()
-                    partial=dict(error.partial or {});found=any((partial.get('contacts') or {}).values())
-                    # Contacts-only save keeps checked_at/status untouched; never 'found', so contacts-scope '继续未完成' still selects this site, ordered after untried ones.
-                    store.save_contacts(row['id'],dict(partial,contacts=partial.get('contacts') or {},sources=partial.get('sources') or [],warnings=list(dict.fromkeys((partial.get('warnings') or [])+[str(error)[:400]])),contact_status='incomplete' if found else 'blocked',contact_summary='模型服务暂时不可用，本站稍后重试',scope=job['scope']))
-                    db.execute('UPDATE cloud_jobs SET position=?,updated_at=now() WHERE id=?',(index+1,job['id']))
-                model_failures+=1
-                if model_failures>=MODEL_FAILURE_LIMIT:
-                    store.finish_job(job['id'],owner,'failed','模型服务连续 '+str(MODEL_FAILURE_LIMIT)+' 家不可用，批次已暂停；可稍后继续')
-                    return
-            except AgentServiceError as error:
-                with store.fenced(job['id'],owner) as (db,current):
-                    store.save_contacts(row['id'],error.partial or {'contacts':{},'sources':[],'warnings':[str(error)],'contact_status':'blocked','contact_summary':'模型服务失败，批次已停止','scope':job['scope']})
-                    store.finish_job(job['id'],owner,'failed',str(error))
-                return
-            except CollectionCancelled:raise
-            except LostLease:raise
-            except Exception as error:
-                with store.fenced(job['id'],owner) as (db,current):
-                    if current['cancel_requested'] or stop.is_set():raise CollectionCancelled()
-                    store.save_contacts(row['id'],{'contacts':{},'sources':[],'warnings':[str(error)[:500]],'contact_status':'blocked','contact_summary':str(error)[:500],'scope':job['scope']})
-                    db.execute('UPDATE cloud_jobs SET position=?,updated_at=now() WHERE id=?',(index+1,job['id']))
-        store.finish_job(job['id'],owner,'completed')
+        stopped=run_batch(job_rows(store,job,owner,shutdown),job['mode'],job['scope'],target,start=job['position'],fatal=(LostLease,))
+        if not stopped:store.finish_job(job['id'],owner,'completed')
     except CollectionCancelled:
         if not lost.is_set():
             if shutdown.is_set():
