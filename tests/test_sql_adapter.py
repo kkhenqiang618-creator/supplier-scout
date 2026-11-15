@@ -1,8 +1,7 @@
 import unittest
 from datetime import datetime, timezone
-from psycopg.types.json import Jsonb
 from collection import encode, now
-from cloud_store import SQL, adapt_placeholders, adapt_value
+from cloud_store import Cursor, SQL, adapt_placeholders
 
 
 class FakeCursor:
@@ -69,35 +68,101 @@ class StatementShapeTests(unittest.TestCase):
 
 
 class ParameterBindingTests(unittest.TestCase):
-    def test_json_documents_bind_as_jsonb_for_jsonb_tables(self):
+    def test_json_documents_are_sent_as_plain_text(self):
+        # psycopg sends str untyped, so TEXT and jsonb columns both accept it.
         connection = FakeConnection()
-        SQL(connection).execute('UPDATE suppliers SET contacts=? WHERE id=?', (encode({'email': 'a@b'}), 1))
-        bound = connection.seen[1]
-        self.assertIsInstance(bound[0], Jsonb)
-        self.assertEqual(bound[0].obj, {'email': 'a@b'})
-        self.assertEqual(bound[1], 1)
+        document = encode({'email': 'a@b'})
+        SQL(connection).execute('UPDATE suppliers SET contacts=? WHERE id=?', (document, 1))
+        self.assertEqual(connection.seen[1], (document, 1))
+        self.assertIs(type(connection.seen[1][0]), str)
 
-    def test_json_kept_as_text_for_text_columns(self):
-        connection = FakeConnection()
-        SQL(connection).execute('UPDATE settings SET value=? WHERE key=?', (encode({'a': 1}), 'rules'))
-        bound = connection.seen[1]
-        self.assertIsInstance(bound[0], str)
-        self.assertNotIsInstance(bound[0], Jsonb)
-
-    def test_iso_timestamps_bind_as_datetime(self):
+    def test_timestamps_keep_the_iso_text_shape(self):
         connection = FakeConnection()
         stamp = now()
         SQL(connection).execute('UPDATE suppliers SET checked_at=? WHERE id=?', (stamp, 1))
         bound = connection.seen[1][0]
-        self.assertIsInstance(bound, datetime)
-        self.assertEqual(bound, datetime.fromisoformat(stamp))
+        self.assertIs(type(bound), str)
+        self.assertRegex(bound, r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$')
 
-    def test_postgres_values_read_back_as_text(self):
-        self.assertEqual(adapt_value({'a': [1, 2]}), '{"a": [1, 2]}')
-        self.assertEqual(
-            adapt_value(datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)), '2026-01-02T03:04:05+00:00'
-        )
-        self.assertEqual(adapt_value(7), 7)
+    def test_now_does_not_change_the_stored_text_format(self):
+        self.assertRegex(now(), r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$')
+
+
+class RowPassThroughTests(unittest.TestCase):
+    def test_jsonb_and_timestamp_values_are_not_rewritten(self):
+        # cloud_jobs.state and supplier_ids are already jsonb in production.
+        stamp = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+        class Stub:
+            rowcount = 0
+
+            def fetchone(self):
+                return {'state': {'stage': '云端采集'}, 'supplier_ids': [1, 2], 'updated_at': stamp, 'id': 7}
+
+            def fetchall(self):
+                return []
+
+        row = Cursor(Stub()).fetchone()
+        self.assertIsInstance(row['state'], dict)
+        self.assertEqual(row['state'].get('stage'), '云端采集')
+        self.assertEqual(row['supplier_ids'], [1, 2])
+        self.assertEqual(row['updated_at'], stamp)
+        self.assertEqual(row['id'], 7)
+
+
+class JobRowTests(unittest.TestCase):
+    def test_jsonb_job_rows_support_state_get_and_id_slicing(self):
+        import time
+
+        from cloud_store import Cursor, PostgresStore
+
+        class Stub:
+            rowcount = 0
+
+            def fetchone(self):
+                return {
+                    'id': 7,
+                    'status': 'running',
+                    'cancel_requested': False,
+                    'position': 2,
+                    'scope': 'all',
+                    'mode': 'real',
+                    'state': {'queued_at': time.time(), '_hidden': 1},
+                    'supplier_ids': [11, 12, 13, 14],
+                }
+
+            def fetchall(self):
+                return []
+
+        row = Cursor(Stub()).fetchone()
+        job = PostgresStore.job_state(row)
+        self.assertEqual(job['done'], 2)
+        self.assertNotIn('_hidden', job)
+        self.assertEqual(row['supplier_ids'][row['position'] :], [13, 14])
+
+
+class DecodeRowTests(unittest.TestCase):
+    def test_decode_row_reads_jsonb_values_and_timestamptz(self):
+        from local_store import Store
+
+        row = {
+            'id': 1,
+            'url': 'https://s.example.com',
+            'contacts': {'email': ['a@example.com']},
+            'offers': [{'model': 'M', 'price': '1'}],
+            'sources': [],
+            'warnings': [],
+            'contact_result': {'contact_records': [], 'contact_summary': '', 'scope': 'contacts'},
+            'checked_at': datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+            'created_at': '2026-01-01T00:00:00+00:00',
+            'contact_checked_at': None,
+        }
+        item = Store.decode_row(row)
+        self.assertEqual(item['contacts'], {'email': ['a@example.com']})
+        self.assertEqual(item['offers'][0]['model'], 'M')
+        self.assertEqual(item['checked_at'], '2026-01-02T03:04:05+00:00')
+        self.assertEqual(item['created_at'], '2026-01-01T00:00:00+00:00')
+        self.assertIsNone(item['contact_checked_at'])
 
 
 if __name__ == '__main__':

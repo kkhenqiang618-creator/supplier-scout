@@ -16,20 +16,30 @@ from browser_agent import AgentServiceError, ModelTransientSiteError
 ROOT = Path(__file__).resolve().parent
 
 
-class JsonText(str):
-    """A JSON document stored as text; the Postgres adapter binds it as jsonb."""
-
-
-class TimestampText(str):
-    """An ISO-8601 timestamp stored as text; the Postgres adapter binds it as timestamptz."""
-
-
 def now():
-    return TimestampText(datetime.now(timezone.utc).isoformat(timespec='seconds'))
+    """ISO-8601 text; psycopg sends it untyped so TEXT and timestamptz columns both accept it."""
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
 def encode(value):
-    return JsonText(json.dumps(value, ensure_ascii=False, allow_nan=False))
+    """A JSON document as text; psycopg sends it untyped so TEXT and jsonb columns both accept it."""
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
+def load_json(value, default=None):
+    """Read a JSON document from SQLite text or from a Postgres jsonb value."""
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    return json.loads(value)
+
+
+def time_text(value):
+    """Read a timestamp column from SQLite text or from a Postgres timestamptz value."""
+    if isinstance(value, datetime):
+        return value.isoformat(timespec='seconds')
+    return value
 
 
 def log_exception(where):

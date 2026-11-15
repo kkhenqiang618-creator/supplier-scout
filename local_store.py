@@ -10,6 +10,8 @@ from pathlib import Path
 from collection import (
     now,
     encode,
+    load_json,
+    time_text,
     CollectionCancelled,
     collect_site,
     manual_decision,
@@ -118,7 +120,10 @@ class Store:
     def decode_row(row):
         item = dict(row)
         for key in ['contacts', 'offers', 'sources', 'warnings', 'contact_result']:
-            item[key] = json.loads(item[key])
+            item[key] = load_json(item[key])
+        for key in ['checked_at', 'created_at', 'contact_checked_at']:
+            if key in item:
+                item[key] = time_text(item[key])
         result = item.get('contact_result') or {}
         if not result.get('diagnostics'):
             result['diagnostics'] = collection_diagnostics(result, fallback_url=item.get('url', ''))
@@ -270,14 +275,14 @@ class Store:
         with self.lock, self.connect() as db:
             fields = ('id', 'name', 'url', 'mode', 'offers', 'checked_at')
             suppliers = [
-                {key: json.loads(row[key]) if key == 'offers' else row[key] for key in fields}
+                {key: load_json(row[key]) if key == 'offers' else row[key] for key in fields}
                 for row in db.execute(
                     'SELECT id,name,url,mode,offers,checked_at FROM suppliers WHERE mode=? ORDER BY id',
                     (mode,),
                 )
             ]
             history = [
-                dict(row, offers=json.loads(row['offers']))
+                dict(row, offers=load_json(row['offers']))
                 for row in db.execute('SELECT * FROM history WHERE mode=? ORDER BY id DESC', (mode,))
             ]
             return {'suppliers': suppliers, 'history': history, 'rules': self.rules()}
@@ -301,13 +306,17 @@ class Store:
                     'suppliers': suppliers,
                     'rules': self.rules(),
                     'events': [
-                        dict(r) for r in db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 300')
+                        dict(r, created_at=time_text(r['created_at']))
+                        for r in db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 300')
                     ],
                     'history': [
-                        dict(r, offers=json.loads(r['offers']))
+                        dict(r, offers=load_json(r['offers']), created_at=time_text(r['created_at']))
                         for r in db.execute('SELECT * FROM history ORDER BY id DESC LIMIT 500')
                     ],
-                    'drafts': [dict(r) for r in db.execute('SELECT * FROM drafts ORDER BY id DESC')],
+                    'drafts': [
+                        dict(r, created_at=time_text(r['created_at']))
+                        for r in db.execute('SELECT * FROM drafts ORDER BY id DESC')
+                    ],
                     'job': dict(self.job),
                     'model_service': self.model_service.public(),
                     'integrations': {
