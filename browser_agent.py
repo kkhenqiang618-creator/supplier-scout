@@ -1867,7 +1867,104 @@ def merge_results(moli, chrome):
     }
 
 
-def run_site(
+MAIN_DOMAIN_SUFFIXES = {
+    'com.cn',
+    'net.cn',
+    'org.cn',
+    'gov.cn',
+    'edu.cn',
+    'co.uk',
+    'org.uk',
+    'ac.uk',
+    'com.hk',
+    'com.tw',
+    'co.jp',
+    'co.kr',
+    'com.au',
+    'co.nz',
+    'com.sg',
+}
+
+
+def main_domain(host):
+    """The registrable-looking part of a host (no public-suffix list; a small common-suffix table)."""
+    labels = [label for label in str(host or '').lower().strip('.').split('.') if label]
+    if len(labels) <= 2:
+        return '.'.join(labels)
+    if '.'.join(labels[-2:]) in MAIN_DOMAIN_SUFFIXES and len(labels) >= 3:
+        return '.'.join(labels[-3:])
+    return '.'.join(labels[-2:])
+
+
+def main_site_url(url):
+    """Official host on the same main domain, for a subdomain-only URL; None when there is none.
+
+    api.example.com -> www.example.com; www.example.com -> example.com. A URL that already
+    sits on the bare main domain has no other host to try, and nothing here crosses domains.
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or '').lower()
+    if parts.scheme not in ('http', 'https') or not host:
+        return None
+    domain = main_domain(host)
+    if not domain or '.' not in domain or host == domain:
+        return None  # already the official host of that main domain
+    target = domain if host.startswith('www.') else 'www.' + domain
+    if target == host:
+        return None
+    return urllib.parse.urlunsplit((parts.scheme, target, '/', '', ''))
+
+
+def merge_main_site(primary, extra, alt_url):
+    """Add the same-domain site run to the primary result; contacts are de-duplicated."""
+    records = list(primary.get('contact_records', []))
+    for item in extra.get('contact_records', []):
+        prior = next(
+            (
+                record
+                for record in records
+                if record['type'] == item['type'] and record['value'].lower() == item['value'].lower()
+            ),
+            None,
+        )
+        if prior:
+            prior['additional_sources'] = list(prior.get('additional_sources') or []) + [
+                {
+                    'source_url': item.get('source_url'),
+                    'evidence': item.get('evidence'),
+                    'method': '同主域官网',
+                }
+            ]
+        else:
+            records.append(dict(item, site_role='main_site'))
+    contacts = {}
+    for item in records:
+        contacts.setdefault(item['type'], []).append(item['value'])
+    steps = list(primary.get('steps', [])) + list(extra.get('steps', []))
+    sources = list(primary.get('sources', [])) + [
+        dict(source, site_role='main_site') for source in extra.get('sources', [])
+    ]
+    warnings = list(primary.get('warnings', []))
+    for warning in extra.get('warnings', []):
+        if warning not in warnings:
+            warnings.append(warning)
+    warnings.append('原网址未找到联系方式，已检查同主域官网：' + alt_url)
+    merged = dict(
+        primary,
+        contacts=contacts,
+        contact_records=records,
+        contact_status=choose_contact_status(records, False, len(steps)),
+        contact_summary='已找到 ' + str(len(records)) + ' 条联系线索，按用途确认后跟进',
+        sources=sources,
+        steps=steps,
+        warnings=warnings,
+        diagnostics=list(primary.get('diagnostics', [])) + list(extra.get('diagnostics', [])),
+        main_site=alt_url,
+    )
+    return merged
+
+
+def _run_site(
     url,
     scope,
     service,
@@ -1982,3 +2079,51 @@ def run_site(
             moli, 'Chrome 备用浏览器未完成：' + ((chrome.get('warnings') or ['未能打开页面'])[-1])[:300]
         )
     return merge_results(strip_internal(moli), chrome)
+
+
+def run_site(
+    url,
+    scope,
+    service,
+    rules,
+    log=lambda message: None,
+    moli_factory=Browser,
+    chrome_factory=ChromeBrowser,
+    clock=time.monotonic,
+    chrome_ready=chrome_available,
+):
+    """Run one site, then (contacts or full scope) look at the same main domain's official host.
+
+    P19: an imported API subdomain or admin address (api.example.com, admin.example.com)
+    rarely shows contacts while www.example.com does. Only when the imported URL produced
+    no contact record do we try the other host on the same main domain, contacts-only and
+    with a short budget; the extra sources are marked as the same-domain official site and
+    a failure there never fails the site.
+    """
+    result = _run_site(url, scope, service, rules, log, moli_factory, chrome_factory, clock, chrome_ready)
+    if result.get('contact_records') or scope not in ('contacts', 'all'):
+        return result
+    alt = main_site_url(url)
+    if not alt:
+        return result
+    log('原网址未找到联系方式，改查同主域官网：' + alt)
+    try:
+        extra = run_agent(
+            alt,
+            'contacts',
+            service,
+            rules,
+            log,
+            browser_factory=moli_factory,
+            deadline=clock() + 180,
+            escalate_weak=False,
+            clock=clock,
+        )
+    except Exception as error:  # the imported URL itself is healthy: keep its result
+        result['warnings'].append('同主域官网检查未完成：' + str(error)[:300])
+        return result
+    strip_internal(extra)
+    if not extra.get('sources'):
+        result['warnings'].append('同主域官网无法读取，已保留原网址结果')
+        return result
+    return merge_main_site(result, extra, alt)
