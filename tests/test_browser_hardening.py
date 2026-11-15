@@ -169,6 +169,31 @@ class ReadTimeoutTests(unittest.TestCase):
         self.assertIn("proxy:{server:'http://127.0.0.1:'+target}", source)
         self.assertIn("delete process.env.PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK", source)
 
+    def test_aliyun_waf_pages_count_as_a_challenge(self):
+        import shutil
+
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node is not installed')
+        source = (ROOT / 'agent_browser.cjs').read_text(encoding='utf-8')
+        # P20: run the shipped detection against the raw HTML Aliyun's WAF challenge serves.
+        line = next(row.strip() for row in source.splitlines() if 'const aliyunWaf=' in row)
+        script = 'const rawHtml=process.env.HTML;' + line + ';console.log(aliyunWaf?1:0)'
+        waf = "<script>var arg1='A1B2C3D4E5F6A7B8';document.cookie='acw_sc__v2='+arg1;</script>"
+        plain = '<html><body>欢迎访问</body></html>'
+        results = [
+            subprocess.run(
+                [node, '-e', script],
+                capture_output=True,
+                text=True,
+                env={**os.environ, 'HTML': html},
+                check=True,
+            ).stdout.strip()
+            for html in (waf, plain)
+        ]
+        self.assertEqual(results, ['1', '0'])
+        self.assertIn('const challenge=aliyunWaf||', source)
+
 
 class RenderWeakTests(unittest.TestCase):
     def run_site(self, snapshots, answers):
