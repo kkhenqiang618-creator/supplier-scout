@@ -4,7 +4,6 @@ from unittest import mock
 
 import browser_agent
 
-
 NEWAPI_STATUS = {
     'system_name': '某中转站',
     'version': 'v0.8.7',
@@ -20,11 +19,21 @@ NEWAPI_STATUS = {
     'footer_html': '<footer>© 2025 示例科技 · 微信：example_ops</footer>',
 }
 
+# What new-api / one-api really answers: the useful keys live inside "data".
+WRAPPED_STATUS = {'success': True, 'message': '', 'data': NEWAPI_STATUS}
+WRAPPED_NOTICE = {'success': True, 'message': '', 'data': '<p>客服 QQ：80012345</p>'}
+WRAPPED_ABOUT = {'success': True, 'message': '', 'data': '<p>关于我们：hi@relay.example.com</p>'}
+
 
 class DetectionTests(unittest.TestCase):
-    def test_newapi_status_is_recognised(self):
-        self.assertTrue(browser_agent.is_newapi(NEWAPI_STATUS))
+    def test_newapi_status_is_recognised_after_unwrapping(self):
+        self.assertTrue(browser_agent.is_newapi(browser_agent.unwrap_api(WRAPPED_STATUS)))
         self.assertTrue(browser_agent.is_newapi({'announcements': []}))
+
+    def test_outer_envelope_alone_is_not_enough(self):
+        # The real site was skipped exactly because detection looked at the envelope only.
+        self.assertFalse(browser_agent.is_newapi(WRAPPED_STATUS))
+        self.assertFalse(browser_agent.is_newapi({'success': True, 'message': '', 'data': {'ok': 1}}))
 
     def test_other_json_is_not(self):
         self.assertFalse(browser_agent.is_newapi({'status': 'ok'}))
@@ -32,13 +41,37 @@ class DetectionTests(unittest.TestCase):
         self.assertFalse(browser_agent.is_newapi('text'))
 
 
+class UnwrapTests(unittest.TestCase):
+    def test_data_object_is_returned(self):
+        self.assertIs(browser_agent.unwrap_api(WRAPPED_STATUS), NEWAPI_STATUS)
+
+    def test_data_text_is_returned(self):
+        self.assertEqual(browser_agent.unwrap_api(WRAPPED_NOTICE), '<p>客服 QQ：80012345</p>')
+
+    def test_data_json_text_is_parsed(self):
+        payload = {'success': True, 'data': json.dumps(NEWAPI_STATUS)}
+        self.assertEqual(browser_agent.unwrap_api(payload), NEWAPI_STATUS)
+
+    def test_plain_payload_is_untouched(self):
+        self.assertEqual(browser_agent.unwrap_api(NEWAPI_STATUS), NEWAPI_STATUS)
+        self.assertEqual(browser_agent.unwrap_api('text'), 'text')
+
+
 class ApiTextTests(unittest.TestCase):
     def test_only_public_content_keys_survive(self):
-        text = browser_agent.api_text({**NEWAPI_STATUS, 'data': {'secret': 'sk-123'}})
+        text = browser_agent.api_text(
+            {**browser_agent.unwrap_api(WRAPPED_STATUS), 'data': {'secret': 'sk-123'}}
+        )
         self.assertIn('某中转站', text)
         self.assertIn('sales@example.com', text)
         self.assertIn('t.me/example_support', text)
         self.assertNotIn('sk-123', text)
+
+    def test_wrapped_notice_and_about_keep_their_text(self):
+        notice = browser_agent.api_text(browser_agent.unwrap_api(WRAPPED_NOTICE))
+        about = browser_agent.api_text(browser_agent.unwrap_api(WRAPPED_ABOUT))
+        self.assertIn('客服 QQ：80012345', notice)
+        self.assertIn('hi@relay.example.com', about)
 
     def test_html_is_reduced_to_lines(self):
         text = browser_agent.api_text({'notice': '<p>邮箱 a@b.cn</p><script>x()</script>'})
@@ -50,7 +83,7 @@ class ApiTextTests(unittest.TestCase):
 class ContactExtractionTests(unittest.TestCase):
     def setUp(self):
         self.observation = browser_agent.api_observation(
-            'https://relay.example.com/api/status', NEWAPI_STATUS
+            'https://relay.example.com/api/status', browser_agent.unwrap_api(WRAPPED_STATUS)
         )
         self.assertIsNotNone(self.observation)
 
@@ -65,6 +98,27 @@ class ContactExtractionTests(unittest.TestCase):
             self.assertEqual(record['source_url'], 'https://relay.example.com/api/status')
             self.assertIn(record['evidence'], self.observation['text'].split('\n'))
             self.assertTrue(record['risk_flags'])
+
+    def test_same_handle_on_several_lines_is_one_record(self):
+        observation = {
+            'url': 'https://relay.example.com/api/status',
+            'text': '邮箱：a@example.com\n合作：a@example.com\n客服：a@example.com',
+            'method': '公开接口',
+        }
+        records = browser_agent.api_contact_records([observation])
+        emails = [r for r in records if r['type'] == 'email']
+        self.assertEqual(len(emails), 1)
+        self.assertEqual(emails[0]['evidence'], '邮箱：a@example.com')
+
+    def test_duplicates_across_endpoints_are_merged(self):
+        other = {
+            'url': 'https://relay.example.com/api/notice',
+            'text': '邮箱：A@Example.com',
+            'method': '公开接口',
+        }
+        records = browser_agent.api_contact_records([self.observation, other])
+        emails = [r['value'] for r in records if r['type'] == 'email']
+        self.assertEqual(len(emails), len(set(e.lower() for e in emails)))
 
     def test_records_pass_the_normal_verification(self):
         records = browser_agent.api_contact_records([self.observation])
@@ -93,11 +147,11 @@ class ProbeTests(unittest.TestCase):
             )
         return observations, calls, log
 
-    def test_reads_status_notice_and_about_once_each(self):
+    def test_reads_wrapped_status_notice_and_about_once_each(self):
         answers = {
-            'https://relay.example.com/api/status': NEWAPI_STATUS,
-            'https://relay.example.com/api/notice': {'content': '<p>客服 QQ：80012345</p>'},
-            'https://relay.example.com/api/about': '<p>关于我们：hi@relay.example.com</p>',
+            'https://relay.example.com/api/status': WRAPPED_STATUS,
+            'https://relay.example.com/api/notice': WRAPPED_NOTICE,
+            'https://relay.example.com/api/about': WRAPPED_ABOUT,
         }
         observations, calls, log = self.probe(answers)
         self.assertEqual(
@@ -110,10 +164,15 @@ class ProbeTests(unittest.TestCase):
         )
         self.assertEqual(len(observations), 3)
         self.assertTrue(all(o['method'] == '公开接口' for o in observations))
+        self.assertIn('某中转站', observations[0]['text'])
+        self.assertIn('客服 QQ：80012345', observations[1]['text'])
+        self.assertIn('hi@relay.example.com', observations[2]['text'])
         log.assert_called_with('识别为 new-api/one-api 类系统，读取公开接口公告')
 
     def test_plain_json_site_is_left_alone(self):
-        observations, calls, _ = self.probe({'https://relay.example.com/api/status': {'ok': True}})
+        observations, calls, _ = self.probe(
+            {'https://relay.example.com/api/status': {'success': True, 'data': {'ok': True}}}
+        )
         self.assertEqual(observations, [])
         self.assertEqual(len(calls), 1)
 
@@ -125,25 +184,20 @@ class ProbeTests(unittest.TestCase):
             raise ValueError('robots.txt 不允许读取该页面')
 
         observations, calls, _ = self.probe(
-            {'https://relay.example.com/api/status': NEWAPI_STATUS}, allow=refuse
+            {'https://relay.example.com/api/status': WRAPPED_STATUS}, allow=refuse
         )
         self.assertEqual(observations, [])
         self.assertEqual(calls, [])
 
     def test_missing_extras_keep_status_observation(self):
-        observations, _, _ = self.probe({'https://relay.example.com/api/status': NEWAPI_STATUS})
+        observations, _, _ = self.probe({'https://relay.example.com/api/status': WRAPPED_STATUS})
         self.assertEqual(len(observations), 1)
         self.assertEqual(observations[0]['url'], 'https://relay.example.com/api/status')
-
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 class RunAgentIntegrationTests(unittest.TestCase):
     def test_public_api_contacts_land_in_the_normal_result(self):
         import tempfile
-        import unittest.mock as mock
         from pathlib import Path
 
         from model_service import ModelService
@@ -163,7 +217,7 @@ class RunAgentIntegrationTests(unittest.TestCase):
                 pass
 
         answers = {
-            'https://relay.example.com/api/status': json.dumps(NEWAPI_STATUS),
+            'https://relay.example.com/api/status': json.dumps(WRAPPED_STATUS),
             'https://relay.example.com/api/notice': ValueError('404'),
             'https://relay.example.com/api/about': ValueError('404'),
         }
@@ -208,3 +262,7 @@ class RunAgentIntegrationTests(unittest.TestCase):
         api_sources = [s for s in result['sources'] if s['method'] == '公开接口']
         self.assertEqual(api_sources[0]['url'], 'https://relay.example.com/api/status')
         self.assertIn('sales@example.com', api_sources[0]['excerpt'])
+
+
+if __name__ == '__main__':
+    unittest.main()
