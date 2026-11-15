@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import html
 import http.client
 import json
 import math
@@ -655,6 +656,195 @@ def download_image(src):
     return data
 
 
+PUBLIC_API_PATHS = ('/api/status', '/api/notice', '/api/about')
+# new-api / one-api expose the site's announcements, FAQ and footer through these
+# read-only endpoints; the same keys identify the system, so a normal JSON API is
+# never mistaken for one.
+NEWAPI_KEYS = ('system_name', 'announcements', 'footer_html', 'faq', 'start_time')
+API_TEXT_KEYS = {
+    'system_name',
+    'announcements',
+    'faq',
+    'footer_html',
+    'notice',
+    'about',
+    'content',
+    'description',
+    'contact',
+    'contact_info',
+    'support',
+    'title',
+    'question',
+    'answer',
+}
+API_MAX_BYTES = 200_000
+API_MAX_TEXT = 6000
+API_EMAIL = re.compile(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}')
+API_MOBILE = re.compile(r'(?<!\d)1[3-9]\d{9}(?!\d)')
+API_LINK_TYPES = (
+    (re.compile(r'https?://(?:qm|qun)\.qq\.com/[^\s"\'<>）)]+', re.I), 'qq_group'),
+    (re.compile(r'https?://(?:t\.me|telegram\.me)/[^\s"\'<>）)]+', re.I), 'telegram'),
+    (re.compile(r'https?://(?:discord\.gg|discord\.com)/[^\s"\'<>）)]+', re.I), 'discord'),
+    (re.compile(r'https?://(?:work\.)?weixin\.qq\.com/[^\s"\'<>）)]+', re.I), 'wechat_link'),
+)
+API_LABELED_HANDLE = re.compile(
+    r'(?:微信|wechat|weixin|QQ群|QQ号|QQ)\s*(?:号|群号)?\s*[：:]\s*([A-Za-z0-9_\-.@]{4,40})', re.I
+)
+API_RISK = '来自公开接口（公告/关于），用途和有效性需核实'
+
+
+def plain_text(value):
+    """Reduce an HTML/JSON string to readable lines; tag markup never reaches contacts or evidence."""
+    text = html.unescape(str(value or ''))
+    text = re.sub(
+        r'<a\b[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', r'\2 \1', text, flags=re.S | re.I
+    )
+    text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', text, flags=re.S | re.I)
+    text = re.sub(r'<br\s*/?>|</(?:p|div|li|tr|h[1-6])>', '\n', text, flags=re.I)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'[ \t\r\f\v]+', ' ', text)
+    return re.sub(r'\n\s*\n+', '\n', text).strip()
+
+
+def api_text(payload, limit=API_MAX_TEXT):
+    """Flatten only the announcement/contact-shaped values of a public API answer."""
+    lines = []
+
+    def walk(value, key=''):
+        if len('\n'.join(lines)) > limit:
+            return
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                walk(child, str(child_key))
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, key)
+        elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            if key.lower() in API_TEXT_KEYS:
+                text = plain_text(value)
+                if text:
+                    lines.append(key + ': ' + text)
+
+    if isinstance(payload, str):
+        text = plain_text(payload)
+        return text[:limit]
+    walk(payload)
+    return '\n'.join(lines)[:limit]
+
+
+def is_newapi(payload):
+    """True for the /api/status answer of a new-api / one-api deployment."""
+    if not isinstance(payload, dict):
+        return False
+    keys = {str(key).lower() for key in payload}
+    return 'system_name' in keys or 'announcements' in keys or 'footer_html' in keys
+
+
+def fetch_public_api(url):
+    """One public GET through the collection egress; JSON/text responses only."""
+    validate_url(url)
+    from engine import SafeRedirect
+    from browser_egress import collection_opener
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            'User-Agent': 'SupplierScout/0.1 (public-page research)',
+            'Accept': 'application/json,text/plain,text/html',
+        },
+    )
+    with collection_opener(SafeRedirect(), PeerHTTPHandler(), PeerHTTPSHandler()) as opener:
+        with opener.open(request, timeout=12) as response:
+            raw = response.read(API_MAX_BYTES + 1)
+            content_type = response.headers.get_content_type()
+            charset = response.headers.get_content_charset() or 'utf-8'
+            final = response.url
+    if len(raw) > API_MAX_BYTES:
+        raise ValueError('公开接口响应过大')
+    if content_type not in ('application/json', 'text/plain', 'text/html', 'application/xhtml+xml'):
+        raise ValueError('公开接口不是 JSON 或文本')
+    return raw.decode(charset, errors='replace'), final
+
+
+def api_observation(url, payload):
+    text = api_text(payload)
+    if not text:
+        return None
+    return {'url': url, 'text': text, 'method': '公开接口', 'render_weak': False}
+
+
+def api_contact_records(observations):
+    """Extract contacts from public API text with the exact line as evidence."""
+    records = []
+    for observation in observations:
+        text = observed_text(observation)
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            values = [(value, 'email') for value in API_EMAIL.findall(line)]
+            values += [(value, 'phone') for value in API_MOBILE.findall(line)]
+            values += [(value, kind) for pattern, kind in API_LINK_TYPES for value in pattern.findall(line)]
+            values += [
+                (value, 'wechat' if re.search(r'微信|wechat|weixin', line, re.I) else 'qq')
+                for value in API_LABELED_HANDLE.findall(line)
+            ]
+            seen = set()
+            for value, kind in values:
+                if (kind, value.lower()) in seen:
+                    continue
+                seen.add((kind, value.lower()))
+                records.append(
+                    {
+                        'type': kind,
+                        'value': value,
+                        'purpose': '公告/公开接口信息',
+                        'source_url': observation['url'],
+                        'evidence': line[:300],
+                        'risk_flags': [API_RISK],
+                    }
+                )
+    return records
+
+
+def probe_public_api(page_url, allow, log=lambda message: None):
+    """Read the read-only endpoints of a new-api / one-api site before the agent starts.
+
+    Every byte goes through the same address checks and the origin's robots.txt; any
+    failure (not that kind of system, robots refusal, network, non-JSON) just returns
+    an empty list and leaves the normal browser run untouched.
+    """
+    parts = urllib.parse.urlsplit(page_url)
+    if parts.scheme not in ('http', 'https') or not parts.netloc:
+        return []
+    base = parts.scheme + '://' + parts.netloc
+    try:
+        allow(base + PUBLIC_API_PATHS[0])
+        body, _ = fetch_public_api(base + PUBLIC_API_PATHS[0])
+        status = json.loads(body)
+    except Exception:
+        return []
+    if not is_newapi(status):
+        return []
+    log('识别为 new-api/one-api 类系统，读取公开接口公告')
+    observations = []
+    for path, payload in zip(PUBLIC_API_PATHS, [status, None, None]):
+        if payload is None:
+            try:
+                allow(base + path)
+                body, _ = fetch_public_api(base + path)
+                try:
+                    payload = json.loads(body)
+                except ValueError:
+                    payload = body
+            except Exception:
+                continue
+        observation = api_observation(base + path, payload)
+        if observation:
+            observations.append(observation)
+    return observations
+
+
 def run_qr_decoder(path):
     if sys.platform == 'darwin':
         decoder = ROOT / 'runtime' / 'qr_decode'
@@ -900,7 +1090,7 @@ def run_agent(
             'sources': [
                 {
                     'url': s['url'],
-                    'method': method,
+                    'method': s.get('method') or method,
                     'excerpt': observed_text(s)[:35000],
                     'text_length': len(observed_text(s)),
                 }
@@ -983,6 +1173,14 @@ def run_agent(
                 urllib.parse.urlsplit(value).netloc.lower(),
             )
             migration_origins.update([origin(url), origin(snapshot['url'])])
+            # new-api / one-api sites keep announcements and contacts only in public read-only
+            # endpoints; read them before the agent spends steps on a login wall.
+            api_observations = probe_public_api(snapshot['url'], allow, log)
+            if api_observations:
+                observations.extend(api_observations)
+                found, rejected = validate_contacts(api_contact_records(api_observations), api_observations)
+                warnings.extend(rejected)
+                records.extend(found)
             if (
                 escalate_weak
                 and snapshot.get('render_weak')
