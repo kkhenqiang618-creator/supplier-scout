@@ -33,6 +33,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call('/api/drafts',{'id':sid})[0],200)
         draft=self.call('/api/draft?id='+str(sid)); self.assertEqual(draft[0],200); self.assertIn(b'X-Unsent: 1',draft[2])
         csv=self.call('/api/export?mode=real'); self.assertEqual(csv[0],200); self.assertIn('测试供应商',csv[2].decode('utf-8-sig')); self.assertIn('0.35',csv[2].decode('utf-8-sig'))
+    def test_state_omits_source_text_and_detail_endpoint_returns_it(self):
+        self.call('/api/import',{'rows':[{'name':'来源测试','url':'https://example.com'}]})
+        sid=json.loads(self.call('/api/state')[2])['suppliers'][0]['id']
+        excerpt='长篇来源原文'*50
+        self.app.store.save_result(sid,{'offers':[],'sources':[{'url':'https://example.com/pricing','excerpt':excerpt}],'contacts':{}})
+        summary=json.loads(self.call('/api/state')[2])['suppliers'][0]
+        self.assertEqual(summary['sources'],[]);self.assertEqual(summary['source_count'],1);self.assertTrue(summary['_summary'])
+        detail=json.loads(self.call('/api/supplier?id='+str(sid))[2])
+        self.assertEqual(detail['sources'][0]['excerpt'],excerpt);self.assertNotIn('_summary',detail)
+        self.assertEqual(self.call('/api/supplier?id=999')[0],404)
     def test_excel_upload_and_single_address(self):
         from test_importers import workbook_fixture
         payload={'filename':'名单.xlsx','file_base64':base64.b64encode(workbook_fixture()).decode()}

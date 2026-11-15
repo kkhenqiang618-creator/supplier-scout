@@ -293,9 +293,15 @@ class Store:
             suppliers=[{key:json.loads(row[key]) if key=='offers' else row[key] for key in fields} for row in db.execute('SELECT id,name,url,mode,offers,checked_at FROM suppliers WHERE mode=? ORDER BY id',(mode,))]
             history=[dict(row,offers=json.loads(row['offers'])) for row in db.execute('SELECT * FROM history WHERE mode=? ORDER BY id DESC',(mode,))]
             return {'suppliers':suppliers,'history':history,'rules':self.rules()}
-    def state(self):
+    def state(self,full=True):
         with self.lock,self.connect() as db:
-            return self.workspace_state({'suppliers':[self.decode_row(r) for r in db.execute('SELECT * FROM suppliers ORDER BY id')],
+            if full:
+                suppliers=[self.decode_row(r) for r in db.execute('SELECT * FROM suppliers ORDER BY id')]
+            else:
+                # The 1.5s poll must not ship every source excerpt; the drawer fetches /api/supplier.
+                suppliers=[self.decode_row(r) for r in db.execute("""SELECT id,name,url,mode,status,reason,contacts,notes,checked_at,created_at,contact_status,contact_checked_at,warnings,offers,contact_result,'[]' AS sources,json_array_length(sources) AS source_count FROM suppliers ORDER BY id""")]
+                for row in suppliers:row['_summary']=True
+            return self.workspace_state({'suppliers':suppliers,
                 'rules':self.rules(),'events':[dict(r) for r in db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 300')],
                 'history':[dict(r,offers=json.loads(r['offers'])) for r in db.execute('SELECT * FROM history ORDER BY id DESC LIMIT 500')],
                 'drafts':[dict(r) for r in db.execute('SELECT * FROM drafts ORDER BY id DESC')], 'job':dict(self.job),
@@ -551,7 +557,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self.check_host(): return self.send({'error':'仅允许本机访问'},403)
         path=urlsplit(self.path).path; params=parse_qs(urlsplit(self.path).query); store=self.store
         try:
-            if path=='/api/state': return self.send(store.state())
+            if path=='/api/state': return self.send(store.state(full=False))
+            if path=='/api/supplier':
+                try:return self.send(store.get(int(params.get('id',['0'])[0])))
+                except (ValueError,KeyError):return self.send({'error':'供应商不存在'},404)
             if path=='/api/pricing': return self.send(store.pricing(params.get('mode',['real'])[0]))
             if path=='/api/export-contacts':
                 mode=params.get('mode',['real'])[0];output=io.StringIO();writer=csv.writer(output)
