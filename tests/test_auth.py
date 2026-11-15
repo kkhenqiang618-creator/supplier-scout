@@ -8,7 +8,6 @@ import tempfile
 import threading
 import time
 import unittest
-from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 

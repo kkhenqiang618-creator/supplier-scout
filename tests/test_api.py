@@ -76,7 +76,8 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call('/api/supplier-entry',body,origin='https://evil.example')[0],403)
 
     def test_internal_errors_return_a_generic_message_and_keep_details_server_side(self):
-        import io,sys
+        import io
+        import sys
         captured=io.StringIO()
         with patch.object(self.app.store,'update_rules',side_effect=RuntimeError('DATABASE_URL=secret')),patch.object(sys,'stderr',captured):
             code,_,body=self.call('/api/rules',{'rules':{}})

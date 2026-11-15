@@ -45,7 +45,7 @@ class WorkspaceHttpTests(test_api.ApiTests):
         self.assertEqual(followups[str(sid)]['note'],'第一次')
         self.assertEqual(followups['7']['note'],'旧记录')
     def test_pricing_full_offers_history_and_no_model_service(self):
-        sid=self.fixture()
+        self.fixture()
         response=self.call('/api/pricing?mode=real');self.assertEqual(response[0],200)
         data=json.loads(response[2]);self.assertEqual(len(data['suppliers'][0]['offers']),6)
         self.assertEqual(len(data['history'][0]['offers']),6)

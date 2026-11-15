@@ -1,5 +1,9 @@
 """One-time private local SQLite import. Credentials are read only from env/files."""
-import argparse,contextlib,json,sqlite3,sys
+import argparse
+import contextlib
+import json
+import sqlite3
+import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from cloud_store import PostgresStore

@@ -1,8 +1,6 @@
 """Real isolated process fixtures; no browser, model or external network."""
-import json
 import os
 import subprocess
-import sys
 import tempfile
 import threading
 import time

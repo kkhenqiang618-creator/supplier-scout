@@ -10,8 +10,14 @@ from psycopg.types.json import Jsonb
 from urllib.parse import urlsplit
 from cloud_store import PostgresStore, LostLease
 from model_service import ModelService, ModelConfigError, ModelTransientError, PHASE_TEXT, NETWORK_PHASES
-from collection import collect_site, CollectionCancelled, AgentServiceError, BatchRuntimeError, ModelTransientSiteError, merge_contacts
+from collection import collect_site, CollectionCancelled, AgentServiceError, BatchRuntimeError, ModelTransientSiteError, merge_contacts  # noqa: F401 - re-exported for tests and callers
 from job_runner import MODEL_FAILURE_MESSAGE, run_batch
+
+# Re-exported so tests and deployments can keep using this module as the cloud entry.
+__all__ = ['CloudBatchTarget','job_rows','execute_job','run_once','main','self_check','self_check_once',
+    'run_batch','MODEL_FAILURE_MESSAGE','collect_site','CollectionCancelled','AgentServiceError',
+    'BatchRuntimeError','ModelTransientSiteError','merge_contacts','PostgresStore','LostLease',
+    'ModelService','ModelConfigError','ModelTransientError','PHASE_TEXT','NETWORK_PHASES']
 
 HEARTBEAT_INTERVAL=5
 HEARTBEAT_GRACE=35

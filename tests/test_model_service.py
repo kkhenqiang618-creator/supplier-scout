@@ -39,7 +39,8 @@ if __name__=='__main__':unittest.main()
 
 class ProviderBoundaryTests(unittest.TestCase):
     def test_root_url_uses_v1_and_test_resolves_exact_advertised_model(self):
-        import json,threading
+        import json
+        import threading
         from http.server import HTTPServer,BaseHTTPRequestHandler
         seen=[]
         class Provider(BaseHTTPRequestHandler):
@@ -64,7 +65,8 @@ class ProviderBoundaryTests(unittest.TestCase):
                 self.assertEqual(seen,[('/v1/chat/completions','deepseek-v4.1-flash')])
         finally:server.shutdown();server.server_close();thread.join()
     def test_provider_error_is_actionable_and_secret_is_redacted(self):
-        import io,urllib.error
+        import io
+        import urllib.error
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as folder:
             service=ModelService(Path(folder)/'provider.json');service.save({'base_url':'https://example.com/v1','model':'wrong','api_key':'test-secret'})
@@ -90,7 +92,8 @@ class ProviderBoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'配置已变更'):service.test()
             self.assertEqual(service.public()['model'],'two');self.assertFalse(service.public()['tested'])
     def test_actual_http_contract_empty_body_and_redirect_boundaries(self):
-        import json,threading
+        import json
+        import threading
         from http.server import HTTPServer,BaseHTTPRequestHandler
         seen=[]
         class Receiver(BaseHTTPRequestHandler):

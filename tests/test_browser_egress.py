@@ -67,7 +67,6 @@ class IntegrationTests(unittest.TestCase):
     def test_moli_creates_guard_and_closes_it_when_upstream_is_configured(self):
         import browser_agent
         import tempfile
-        from pathlib import Path
         from unittest.mock import MagicMock
         guard=MagicMock();guard.port=12345
         with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ,{'SCOUT_BROWSER_PROXY_URL':'http://127.0.0.1:7897'}),patch('browser_agent.runtime_paths',return_value=('moli','module')),patch('egress_proxy.GuardProxy',return_value=guard),patch('browser_agent.subprocess.Popen') as popen,patch('browser_agent.urllib.request.urlopen'),patch.object(browser_agent.Browser,'_spawn'):
@@ -77,7 +76,6 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(args[args.index('--http-proxy')+1],'http://127.0.0.1:12345')
             b.close();guard.close.assert_called_once()
     def test_auxiliary_download_enters_guard_even_with_no_proxy(self):
-        from unittest.mock import MagicMock
         with patch.dict(os.environ,{'SCOUT_BROWSER_PROXY_URL':'http://127.0.0.1:7897','NO_PROXY':'*'}),patch('egress_proxy.GuardProxy') as cls:
             cls.return_value.port=12345
             with net.collection_opener() as opener:

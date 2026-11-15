@@ -69,7 +69,6 @@ class ExtensionTests(Harness):
                 result, _, contexts, logs = self.run_with(snapshots, answers, robots=robots or 'User-agent: *\nAllow: /', deadline=300, extended_deadline=310)
                 self.assertEqual(len(contexts), 8); self.assertFalse(any(NOTICE in m for m in logs))
         # A dead browser ends the run where it died, so it never reaches the extension.
-        events = []
         class Dead:
             label = 'Moli'
             def __init__(self, folder): self.n = 0

@@ -319,7 +319,8 @@ class MergeTests(unittest.TestCase):
 class WiringTests(unittest.TestCase):
     def test_collection_worker_and_server_timeouts(self):
         root = Path(__file__).resolve().parents[1]
-        self.assertIn('result=run_site(', (root / 'collection_worker.py').read_text(encoding='utf-8'))
+        worker_source = (root / 'collection_worker.py').read_text(encoding='utf-8')
+        self.assertRegex(worker_source, r'result\s*=\s*run_site\(')
         import server
         self.assertEqual(server.SITE_HARD_TIMEOUT, {'all': 840, 'contacts': 480})
         # Worst step = 3 x 45s model requests + 40s retry sleeps + one 30s browser command = 205s; the last step may start at soft - reserve,
@@ -334,7 +335,9 @@ class WiringTests(unittest.TestCase):
         self.assertEqual((browser_agent.SITE_BUDGET, browser_agent.MOLI_BUDGET, browser_agent.STEP_RESERVE), (810, 360, 210))
 
     def test_collect_site_uses_scope_aware_hard_timeout(self):
-        import io, threading, types
+        import io
+        import threading
+        import types
         import server
         class Process:
             pid = 0

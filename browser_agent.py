@@ -2,7 +2,6 @@
 import base64
 import binascii
 import http.client
-import ipaddress
 import json
 import math
 import queue
@@ -19,7 +18,7 @@ import urllib.parse
 import urllib.request
 import urllib.robotparser
 from pathlib import Path
-from model_service import ModelService,ModelConfigError,ModelTransientError
+from model_service import ModelService,ModelTransientError
 from engine import validate_url,is_public_ip
 from collection_diagnostics import collection_diagnostics
 from entry_recovery import migration_candidates,verified_destination,canonical_url

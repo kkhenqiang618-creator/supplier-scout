@@ -132,7 +132,6 @@ class CloudSelfCheckTests(unittest.TestCase):
         self.assertEqual(len(seen),1);self.assertEqual(sites,[]);store.finish_job.assert_not_called()
         self.assertTrue(any("status=?,lease_owner=NULL" in str(c.args[0]) and c.args[1][0]=='queued' for c in db.execute.call_args_list))
     def test_cancel_before_probes_skips_them(self):
-        import cloud_worker
         store=self.store()
         @contextlib.contextmanager
         def fenced(*args):yield MagicMock(),{'cancel_requested':True}

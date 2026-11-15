@@ -1,5 +1,4 @@
 """Opt-in integration tests. Run against a fresh cloud test project before import."""
-import json
 import os
 import threading
 import time

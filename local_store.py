@@ -11,7 +11,7 @@ from collection import (now, encode, CollectionCancelled, collect_site, manual_d
 from engine import DEFAULT_RULES, evaluate, validate_rules
 from collection_diagnostics import collection_diagnostics
 from entry_recovery import validate_entry_url, canonical_url
-from importers import parse_file, parse_text, prepare_rows
+from importers import prepare_rows
 from model_service import ModelService
 
 LOCAL_SCHEMA_VERSION=1

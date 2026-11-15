@@ -3,7 +3,6 @@ import json
 import socket
 import tempfile
 import threading
-import time
 import unittest
 from http.server import HTTPServer,BaseHTTPRequestHandler
 from pathlib import Path

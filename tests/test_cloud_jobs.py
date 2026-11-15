@@ -137,7 +137,7 @@ class CloudJobResilienceTests(unittest.TestCase):
         update=[q for q,_ in queries if q.startswith('UPDATE cloud_jobs')];self.assertEqual(len(update),1);self.assertIn("status='stopping'",update[0]);self.assertNotIn('lease_owner=NULL',update[0]);store.event.assert_not_called()
     def test_late_worker_writes_are_fenced_after_direct_stop(self):
         # Every worker write path filters on its own lease, a live lease_until and an active status; a directly stopped job matches none.
-        from cloud_store import PostgresStore,LostLease
+        from cloud_store import LostLease
         store,queries=self.scripted_store(None)
         with self.assertRaises(LostLease):
             with store.fenced('job','late-owner'):pass

@@ -1,8 +1,17 @@
 """Contact QR frontend: vendored library route, auth boundary, and the Node QR helper test."""
-import hashlib, http.client, json, os, shutil, subprocess, tempfile, threading, unittest
+import hashlib
+import http.client
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
+import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-import auth, server
+import auth
+import server
 ROOT = Path(__file__).resolve().parents[1]
 QR_SHA256 = '18ae399f81182bc9de916e9c77b195df20cc58d6f2d55a62b085a299f1bf1780'
 

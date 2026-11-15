@@ -2,7 +2,6 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch
-import server
 import local_store
 from server import Store, ModelTransientSiteError
 

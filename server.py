@@ -19,6 +19,17 @@ from importers import MAX_FILE_BYTES, parse_file, parse_text, prepare_rows
 from local_store import Store, LocalBatchTarget, draft_content, make_draft
 from web_app import Handler, create_server
 
+# Re-exported for tests and scripts written against the pre-split module.
+__all__ = [
+    'ROOT', 'now', 'encode', 'log_exception', 'CollectionCancelled', 'BatchRuntimeError',
+    'SITE_HARD_TIMEOUT', '_terminate_tree', 'collect_site', 'QUOTE_CHANGED_WARNING',
+    'manual_decision', 'merge_sources', 'merge_contacts', 'quote_fingerprint',
+    'AgentServiceError', 'ModelTransientSiteError', 'DEFAULT_RULES', 'evaluate', 'crawl',
+    'extract_page', 'validate_rules', 'MAX_FILE_BYTES', 'parse_file', 'parse_text',
+    'prepare_rows', 'Store', 'LocalBatchTarget', 'draft_content', 'make_draft', 'Handler',
+    'create_server', 'main',
+]
+
 def main():
     parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=8765); parser.add_argument('--db'); args=parser.parse_args()
     (ROOT/'data').mkdir(exist_ok=True)

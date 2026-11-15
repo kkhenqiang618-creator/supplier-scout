@@ -1,5 +1,9 @@
 """End-to-end real browsers + fixture model, localhost migration notices only."""
-import json,sys,tempfile,threading,unittest
+import json
+import sys
+import tempfile
+import threading
+import unittest
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from unittest.mock import patch

@@ -1,5 +1,4 @@
 """Real browser contact regressions; localhost fixtures, no model or supplier data."""
-import json
 import sys
 import tempfile
 import threading

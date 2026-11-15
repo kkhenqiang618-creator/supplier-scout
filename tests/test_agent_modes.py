@@ -17,7 +17,8 @@ class AgentModeTests(unittest.TestCase):
         snapshot['images'][0].update(alt='登录二维码',context='扫码登录')
         self.assertEqual(qr_contact_records(snapshot,'i2',[link]),[])
     def test_robots_tls_fallback_checks_redirects_and_keeps_cert_verification(self):
-        import subprocess,urllib.error
+        import subprocess
+        import urllib.error
         from pathlib import Path
         from unittest.mock import patch
         from browser_agent import fetch_robots

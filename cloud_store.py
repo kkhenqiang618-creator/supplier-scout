@@ -4,7 +4,6 @@ import copy
 import json
 import os
 import re
-import tempfile
 import threading
 import time
 import uuid
@@ -15,7 +14,7 @@ from psycopg.types.json import Jsonb
 from cryptography.fernet import Fernet
 from model_service import ModelService
 from datetime import datetime
-from collection import encode, now, merge_sources, merge_contacts, JsonText, TimestampText
+from collection import encode, merge_sources, merge_contacts, JsonText, TimestampText
 from local_store import Store
 from rulebook import A_RULES
 

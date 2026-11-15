@@ -72,7 +72,8 @@ class ReadTimeoutTests(unittest.TestCase):
     def test_silent_worker_raises_and_is_killed(self):
         browser = Browser.__new__(Browser)
         browser.worker = subprocess.Popen([sys.executable, '-c', 'import sys,time\nfor line in sys.stdin: time.sleep(60)'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
-        import queue, threading
+        import queue
+        import threading
         browser.replies = queue.Queue(); threading.Thread(target=Browser._read, args=(browser.worker.stdout, browser.replies), daemon=True).start()
         try:
             start = time.monotonic()
