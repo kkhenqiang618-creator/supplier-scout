@@ -80,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
                     ]
                 )
                 for row in store.state()['suppliers']:
-                    if row['mode'] != mode:
+                    if row['mode'] != mode or row.get('archived_at'):
                         continue
                     records = list(row['contact_result'].get('contact_records') or [])
                     fresh = {(r.get('type'), r.get('value')) for r in records}
@@ -156,7 +156,7 @@ class Handler(BaseHTTPRequestHandler):
                     ]
                 )
                 for row in store.state()['suppliers']:
-                    if row['mode'] != mode:
+                    if row['mode'] != mode or row.get('archived_at'):
                         continue
                     for offer in row['offers'] or [{}]:
                         writer.writerow(
@@ -296,6 +296,10 @@ class Handler(BaseHTTPRequestHandler):
                     data.get('source_url', ''),
                     data.get('expected_url'),
                 )
+            elif path == '/api/supplier-archive':
+                result = store.archive(int(data['id']))
+            elif path == '/api/supplier-restore':
+                result = store.restore(int(data['id']))
             elif path == '/api/review':
                 store.review(int(data['id']), data['status'], data['note'])
                 result = {'ok': True}

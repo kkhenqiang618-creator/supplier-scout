@@ -143,14 +143,14 @@ class ScopedWorkspaceTests(unittest.TestCase):
                     yield ScopedSQL()
 
         db.for_user = lambda username: TenantDB(username)
-        db.conn.executescript('''CREATE TABLE suppliers(id INTEGER PRIMARY KEY,owner TEXT,name TEXT,url TEXT,mode TEXT,status TEXT,reason TEXT,contacts TEXT,offers TEXT,sources TEXT,warnings TEXT,notes TEXT,checked_at TEXT,created_at TEXT,contact_status TEXT,contact_checked_at TEXT,contact_result TEXT);
+        db.conn.executescript('''CREATE TABLE suppliers(id INTEGER PRIMARY KEY,owner TEXT,name TEXT,url TEXT,mode TEXT,status TEXT,reason TEXT,contacts TEXT,offers TEXT,sources TEXT,warnings TEXT,notes TEXT,checked_at TEXT,created_at TEXT,contact_status TEXT,contact_checked_at TEXT,contact_result TEXT,archived_at TEXT);
         CREATE TABLE cloud_jobs(id TEXT,created_at TEXT);
         CREATE TABLE history(id INTEGER PRIMARY KEY,supplier_id INTEGER,mode TEXT,offers TEXT,created_at TEXT);
         CREATE TABLE events(id INTEGER PRIMARY KEY,supplier_id INTEGER,mode TEXT,message TEXT,created_at TEXT);
         CREATE TABLE drafts(id INTEGER PRIMARY KEY,supplier_id INTEGER UNIQUE,subject TEXT,body TEXT,created_at TEXT);''')
         for sid, owner in [(1, 'alice'), (2, 'bob')]:
             db.conn.execute(
-                'INSERT INTO suppliers VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                'INSERT INTO suppliers VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (
                     sid,
                     owner,
@@ -169,6 +169,7 @@ class ScopedWorkspaceTests(unittest.TestCase):
                     'found',
                     '',
                     '{}',
+                    None,
                 ),
             )
 

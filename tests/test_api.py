@@ -83,6 +83,19 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn('_summary', detail)
         self.assertEqual(self.call('/api/supplier?id=999')[0], 404)
 
+    def test_archive_hides_the_supplier_but_keeps_it_restorable(self):
+        self.call('/api/import', {'rows': [{'name': '待归档', 'url': 'https://archive.example.com'}]})
+        state = json.loads(self.call('/api/state')[2])
+        sid = [row['id'] for row in state['suppliers'] if row['url'] == 'https://archive.example.com'][0]
+        self.assertEqual(self.call('/api/supplier-archive', {'id': sid})[0], 200)
+        archived = [row for row in json.loads(self.call('/api/state')[2])['suppliers'] if row['id'] == sid][0]
+        self.assertTrue(archived['archived_at'])
+        self.assertEqual(self.call('/api/supplier?id=' + str(sid))[0], 200)
+        self.assertEqual(self.call('/api/supplier-restore', {'id': sid})[0], 200)
+        restored = [row for row in json.loads(self.call('/api/state')[2])['suppliers'] if row['id'] == sid][0]
+        self.assertFalse(restored['archived_at'])
+        self.assertEqual(self.call('/api/supplier-archive', {'id': 999})[0], 400)
+
     def test_excel_upload_and_single_address(self):
         from test_importers import workbook_fixture
 

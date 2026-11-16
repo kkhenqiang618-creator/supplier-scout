@@ -26,7 +26,7 @@ from entry_recovery import validate_entry_url, canonical_url
 from importers import prepare_rows
 from model_service import ModelService
 
-LOCAL_SCHEMA_VERSION = 1
+LOCAL_SCHEMA_VERSION = 2
 
 
 class Store:
@@ -65,6 +65,7 @@ class Store:
                     ('contact_status', "TEXT NOT NULL DEFAULT 'not_started'"),
                     ('contact_checked_at', 'TEXT'),
                     ('contact_result', "TEXT NOT NULL DEFAULT '{}' "),
+                    ('archived_at', 'TEXT'),
                 ]:
                     if column not in columns:
                         db.execute('ALTER TABLE suppliers ADD COLUMN ' + column + ' ' + definition)
@@ -80,12 +81,15 @@ class Store:
             self.seed()
 
     @contextlib.contextmanager
-    def connect(self):
+    def connect(self, write=False):
         """One connection per unit of work, committed and closed even on error.
 
         Windows refuses to delete or move a directory while a SQLite handle is
         still open, so a leaked handle makes `data/` look "in use" after the app
         exits and turns every temp-dir cleanup into a PermissionError.
+
+        `write` is accepted for parity with the Postgres store, where it selects the
+        advisory write lock; SQLite already serialises writers behind `self.lock`.
         """
         db = sqlite3.connect(self.path, timeout=20)
         db.row_factory = sqlite3.Row
@@ -116,12 +120,56 @@ class Store:
             raise ValueError('供应商不存在')
         return self.decode_row(row)
 
+    def archive(self, sid):
+        """Hide one supplier without losing its quotes, contacts or drafts.
+
+        Archiving is the reversible counterpart of deleting: the row keeps its
+        price history, follow-up state and e-mail draft, and can be restored at
+        any time. A running batch may still hold this row in its queue, so the
+        request is refused while collection is in progress instead of letting the
+        batch trip over a row that disappears mid-run.
+        """
+        sid = int(sid)
+        with self.lock, self.connect(write=True) as db:
+            row = db.execute(
+                'SELECT id,name,url,mode,archived_at FROM suppliers WHERE id=?', (sid,)
+            ).fetchone()
+            if not row:
+                raise ValueError('供应商不存在')
+            job = self.job
+            if job.get('running') or job.get('status') in ('running', 'stopping'):
+                raise ValueError('采集进行中，请停止后再归档')
+            if not row['archived_at']:
+                db.execute('UPDATE suppliers SET archived_at=? WHERE id=?', (now(), sid))
+                db.execute(
+                    'INSERT INTO events(supplier_id,mode,message,created_at) VALUES(?,?,?,?)',
+                    (sid, row['mode'], '已归档记录：' + (row['name'] or row['url']), now()),
+                )
+        return {'ok': True, 'id': sid, 'archived': True}
+
+    def restore(self, sid):
+        """Put an archived supplier back into the workspace."""
+        sid = int(sid)
+        with self.lock, self.connect(write=True) as db:
+            row = db.execute(
+                'SELECT id,name,url,mode,archived_at FROM suppliers WHERE id=?', (sid,)
+            ).fetchone()
+            if not row:
+                raise ValueError('供应商不存在')
+            if row['archived_at']:
+                db.execute('UPDATE suppliers SET archived_at=NULL WHERE id=?', (sid,))
+                db.execute(
+                    'INSERT INTO events(supplier_id,mode,message,created_at) VALUES(?,?,?,?)',
+                    (sid, row['mode'], '已恢复记录：' + (row['name'] or row['url']), now()),
+                )
+        return {'ok': True, 'id': sid, 'archived': False}
+
     @staticmethod
     def decode_row(row):
         item = dict(row)
         for key in ['contacts', 'offers', 'sources', 'warnings', 'contact_result']:
             item[key] = load_json(item[key])
-        for key in ['checked_at', 'created_at', 'contact_checked_at']:
+        for key in ['checked_at', 'created_at', 'contact_checked_at', 'archived_at']:
             if key in item:
                 item[key] = time_text(item[key])
         result = item.get('contact_result') or {}
@@ -277,7 +325,7 @@ class Store:
             suppliers = [
                 {key: load_json(row[key]) if key == 'offers' else row[key] for key in fields}
                 for row in db.execute(
-                    'SELECT id,name,url,mode,offers,checked_at FROM suppliers WHERE mode=? ORDER BY id',
+                    'SELECT id,name,url,mode,offers,checked_at FROM suppliers WHERE mode=? AND archived_at IS NULL ORDER BY id',
                     (mode,),
                 )
             ]
@@ -296,7 +344,7 @@ class Store:
                 suppliers = [
                     self.decode_row(r)
                     for r in db.execute(
-                        """SELECT id,name,url,mode,status,reason,contacts,notes,checked_at,created_at,contact_status,contact_checked_at,warnings,offers,contact_result,'[]' AS sources,json_array_length(sources) AS source_count FROM suppliers ORDER BY id"""
+                        """SELECT id,name,url,mode,status,reason,contacts,notes,checked_at,created_at,contact_status,contact_checked_at,archived_at,warnings,offers,contact_result,'[]' AS sources,json_array_length(sources) AS source_count FROM suppliers ORDER BY id"""
                     )
                 ]
                 for row in suppliers:
@@ -333,6 +381,7 @@ class Store:
         if rejected:
             raise ValueError('第 ' + str(rejected[0]['row']) + ' 行：' + rejected[0]['reason'])
         added = 0
+        archived = 0
         with self.lock, self.connect() as db:
             numeric = [
                 int(r[0])
@@ -341,11 +390,16 @@ class Store:
             ]
             explicit = [int(row['name']) for row in valid if str(row.get('name', '')).isdigit()]
             next_number = max(numeric + explicit + [0]) + 1
+            known = {
+                row[0]: bool(row[1])
+                for row in db.execute("SELECT url,archived_at FROM suppliers WHERE mode='real'")
+            }
             for row in valid:
-                if db.execute(
-                    "SELECT 1 FROM suppliers WHERE url=? AND mode='real'", (row['url'],)
-                ).fetchone():
+                if row['url'] in known:
+                    if known[row['url']]:
+                        archived += 1
                     continue
+                known[row['url']] = False
                 name = str(row.get('name') or '').strip()
                 if not name:
                     name = str(next_number)
@@ -355,8 +409,12 @@ class Store:
                     (name[:120], row['url'], 'real', now()),
                 )
                 added += result.rowcount
-        self.event('导入 ' + str(added) + ' 家供应商，跳过 ' + str(len(valid) - added) + ' 条重复记录')
-        return {'added': added, 'duplicates': len(valid) - added}
+        skipped = len(valid) - added
+        note = '导入 ' + str(added) + ' 家供应商，跳过 ' + str(skipped) + ' 条重复记录'
+        if archived:
+            note += '，其中 ' + str(archived) + ' 条网址已归档，可在「已归档」中恢复'
+        self.event(note)
+        return {'added': added, 'duplicates': skipped, 'archived': archived}
 
     def save_result(self, sid, result):
         with self.lock:
@@ -657,6 +715,7 @@ class Store:
             r
             for r in self.state()['suppliers']
             if r['mode'] == mode
+            and not r.get('archived_at')
             and (
                 (ids and r['id'] in ids)
                 or (

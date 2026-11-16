@@ -1,7 +1,7 @@
 -- Private application schema; never exposed through Supabase's public Data API.
 CREATE SCHEMA IF NOT EXISTS scout_private;
 REVOKE ALL ON SCHEMA scout_private FROM PUBLIC, anon, authenticated;
-CREATE TABLE scout_private.suppliers(id BIGSERIAL PRIMARY KEY,name TEXT NOT NULL,url TEXT NOT NULL,mode TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',reason TEXT NOT NULL DEFAULT '',contacts TEXT NOT NULL DEFAULT '{}',offers TEXT NOT NULL DEFAULT '[]',sources TEXT NOT NULL DEFAULT '[]',warnings TEXT NOT NULL DEFAULT '[]',notes TEXT NOT NULL DEFAULT '',checked_at TEXT,created_at TEXT NOT NULL,contact_status TEXT NOT NULL DEFAULT 'not_started',contact_checked_at TEXT,contact_result TEXT NOT NULL DEFAULT '{}',UNIQUE(url,mode));
+CREATE TABLE scout_private.suppliers(id BIGSERIAL PRIMARY KEY,name TEXT NOT NULL,url TEXT NOT NULL,mode TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',reason TEXT NOT NULL DEFAULT '',contacts TEXT NOT NULL DEFAULT '{}',offers TEXT NOT NULL DEFAULT '[]',sources TEXT NOT NULL DEFAULT '[]',warnings TEXT NOT NULL DEFAULT '[]',notes TEXT NOT NULL DEFAULT '',checked_at TEXT,created_at TEXT NOT NULL,contact_status TEXT NOT NULL DEFAULT 'not_started',contact_checked_at TEXT,contact_result TEXT NOT NULL DEFAULT '{}',archived_at TEXT,UNIQUE(url,mode));
 CREATE TABLE scout_private.settings(key TEXT PRIMARY KEY,value TEXT);
 CREATE TABLE scout_private.events(id BIGSERIAL PRIMARY KEY,supplier_id BIGINT,mode TEXT,message TEXT,created_at TEXT);
 CREATE TABLE scout_private.history(id BIGSERIAL PRIMARY KEY,supplier_id BIGINT,mode TEXT,offers TEXT,created_at TEXT);
