@@ -47,6 +47,30 @@ def worker_view(worker, admin):
     return {key: value for key, value in worker.items() if key not in ('job_id', 'job_owner', 'site')}
 
 
+def pick_candidates(candidates, mode, ids=None, scope='all', selection='remaining'):
+    """Rows a cloud batch may claim. Archived sites are never collected again."""
+    return [
+        row
+        for row in candidates
+        if row['mode'] == mode
+        and not row['archived_at']
+        and (
+            (ids and row['id'] in ids)
+            or (
+                not ids
+                and (
+                    mode == 'demo'
+                    or selection == 'all'
+                    or scope == 'contacts'
+                    and row['contact_status'] != 'found'
+                    or scope == 'all'
+                    and row['status'] == 'pending'
+                )
+            )
+        )
+    ]
+
+
 class LostLease(RuntimeError):
     pass
 
@@ -325,8 +349,8 @@ class PostgresStore(Store):
             row = db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
         return json.loads(row['value']) if row else copy.deepcopy(A_RULES)
 
-    def connect(self):
-        return self.database.transaction()
+    def connect(self, write=False):
+        return self.database.transaction(write=write)
 
     def _write(self, method, *args, **kwargs):
         with self.database.transaction(write=True), self.lock:
@@ -428,7 +452,7 @@ class PostgresStore(Store):
             data['worker'] = self.worker_status()
         else:
             with self.lock, self.connect() as db:
-                projection = """SELECT id,name,url,mode,status,reason,contacts,notes,checked_at,created_at,contact_status,contact_checked_at,warnings,
+                projection = """SELECT id,name,url,mode,status,reason,contacts,notes,checked_at,created_at,contact_status,contact_checked_at,archived_at,warnings,
                     '[]'::text AS sources,
                     jsonb_path_query_array(offers::jsonb,'$[0 to 2]')::text AS offers,
                     jsonb_array_length(offers::jsonb) AS offer_count,
@@ -575,27 +599,9 @@ class PostgresStore(Store):
                 )
             # Light projection under the same per-user RLS scope as Store.state; avoids decoding every source excerpt just to pick ids.
             candidates = db.execute(
-                "SELECT id,mode,status,contact_status,checked_at,contact_checked_at,contact_result::jsonb->>'scope' AS attempt_scope FROM suppliers ORDER BY id"
+                "SELECT id,mode,status,contact_status,checked_at,contact_checked_at,archived_at,contact_result::jsonb->>'scope' AS attempt_scope FROM suppliers ORDER BY id"
             ).fetchall()
-            rows = [
-                row
-                for row in candidates
-                if row['mode'] == mode
-                and (
-                    (ids and row['id'] in ids)
-                    or (
-                        not ids
-                        and (
-                            mode == 'demo'
-                            or selection == 'all'
-                            or scope == 'contacts'
-                            and row['contact_status'] != 'found'
-                            or scope == 'all'
-                            and row['status'] == 'pending'
-                        )
-                    )
-                )
-            ]
+            rows = pick_candidates(candidates, mode, ids, scope, selection)
             if not rows:
                 raise ValueError('该范围没有待采集记录；可选择重新检查全部')
             rows = self.order_rows(rows, scope)
