@@ -722,20 +722,19 @@ class PostgresStore(Store):
                 return {'available': False}
             row = db.execute(
                 'SELECT state,job_id,job_owner,site,error_text,version,'
-                'EXTRACT(EPOCH FROM started_at) AS started_epoch,EXTRACT(EPOCH FROM heartbeat_at) AS heartbeat_epoch'
+                'EXTRACT(EPOCH FROM now()-started_at) AS uptime,EXTRACT(EPOCH FROM now()-heartbeat_at) AS age'
                 ' FROM cloud_worker_status WHERE id=%s',
                 (WORKER_STATUS_ID,),
             ).fetchone()
         if not row:
             return {'available': True, 'seen': False}
-        clock = time.time()
-        age = max(0, int(clock - float(row['heartbeat_epoch'])))
+        age = max(0, int(float(row['age'])))
         return {
             'available': True,
             'seen': True,
             'online': age <= WORKER_ONLINE_GRACE,
             'last_seen_seconds': age,
-            'uptime_seconds': max(0, int(clock - float(row['started_epoch']))),
+            'uptime_seconds': max(0, int(float(row['uptime']))),
             'state': row['state'],
             'job_id': row['job_id'],
             'job_owner': row['job_owner'],

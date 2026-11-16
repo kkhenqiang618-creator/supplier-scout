@@ -74,19 +74,18 @@ class WorkerStatusStorageTests(unittest.TestCase):
                     'site': '',
                     'error_text': '',
                     'version': 'local',
-                    'started_epoch': 1000.0,
-                    'heartbeat_epoch': 900.0,
+                    'uptime': 30,
+                    'age': 30,
                 },
             ]
         )
         with patch.object(store.__class__, 'connect', lambda self: self.database.transaction()):
-            with patch('cloud_store.time.time', return_value=930.0):
-                status = store.worker_status()
+            status = store.worker_status()
         self.assertTrue(status['available'])
         self.assertTrue(status['seen'])
         self.assertTrue(status['online'])
         self.assertEqual(status['last_seen_seconds'], 30)
-        self.assertEqual(status['uptime_seconds'], 0)  # Clock start after started_at never goes negative.
+        self.assertEqual(status['uptime_seconds'], 30)
         self.assertEqual(status['state'], 'idle')
 
     def test_a_stale_heartbeat_is_reported_offline(self):
@@ -100,14 +99,13 @@ class WorkerStatusStorageTests(unittest.TestCase):
                     'site': 'https://x.example.com',
                     'error_text': '',
                     'version': 'local',
-                    'started_epoch': 0.0,
-                    'heartbeat_epoch': 100.0,
+                    'uptime': 500,
+                    'age': 400,
                 },
             ]
         )
         with patch.object(store.__class__, 'connect', lambda self: self.database.transaction()):
-            with patch('cloud_store.time.time', return_value=100.0 + 400):
-                status = store.worker_status()
+            status = store.worker_status()
         self.assertFalse(status['online'])
         self.assertEqual(status['last_seen_seconds'], 400)
 
