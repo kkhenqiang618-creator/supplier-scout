@@ -318,16 +318,17 @@ class PostgresLoginLimiter:
 
 
 class PostgresStore(Store):
-    def __init__(self, database=None):
+    def __init__(self, database=None, bootstrap=True):
         self.database = database or Database()
         self.lock = threading.RLock()
         self.model_service = CloudModelService(self.database)
         self.path = 'postgres'
-        with self.database.transaction(write=True) as db:
-            db.execute(
-                'INSERT OR IGNORE INTO settings(key,value,owner) VALUES(?,?,?)',
-                ('rules', encode(A_RULES), LEGACY_OWNER),
-            )
+        if bootstrap:
+            with self.database.transaction(write=True) as db:
+                db.execute(
+                    'INSERT OR IGNORE INTO settings(key,value,owner) VALUES(?,?,?)',
+                    ('rules', encode(A_RULES), LEGACY_OWNER),
+                )
 
     def for_user(self, username):
         if not isinstance(username, str) or not username:
