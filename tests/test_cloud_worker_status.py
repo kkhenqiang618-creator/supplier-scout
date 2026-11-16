@@ -247,6 +247,7 @@ class WorkerStatusFrontendTests(unittest.TestCase):
         self.assertIn('state.worker', script)
         self.assertIn('后台进程从未上报状态', script)
         self.assertIn('后台进程最后一次心跳', script)
+        self.assertIn('最近一次失败', script)
         self.assertIn('0003 迁移', script)
         self.assertIn('${workerChip()}', script)
 
