@@ -15,6 +15,10 @@ from local_store import Store, make_draft
 
 
 class Handler(BaseHTTPRequestHandler):
+    # The discovery page is a local-only feature (P25); the cloud handler sets this
+    # to False so /api/discovery* answers 404 instead of running a crawl on Vercel.
+    LOCAL_ONLY = True
+
     @property
     def store(self):
         return self.server.store
@@ -53,7 +57,11 @@ class Handler(BaseHTTPRequestHandler):
         store = self.store
         try:
             if path == '/api/state':
-                return self.send(store.state(full=False))
+                return self.send(dict(store.state(full=False), local=True))
+            if path == '/api/discovery':
+                if not self.LOCAL_ONLY:
+                    return self.send({'error': '路径不存在'}, 404)
+                return self.send({'candidates': store.discovery_list()})
             if path == '/api/supplier':
                 try:
                     return self.send(store.get(int(params.get('id', ['0'])[0])))
@@ -208,6 +216,7 @@ class Handler(BaseHTTPRequestHandler):
                 '/app.js': 'app.js',
                 '/admin.js': 'admin.js',
                 '/workspace.js': 'workspace.js',
+                '/discovery.js': 'discovery.js',
                 '/workspace.css': 'workspace.css',
                 '/style.css': 'style.css',
                 '/favicon.svg': 'favicon.svg',
@@ -245,6 +254,8 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             path = urlsplit(self.path).path
             store = self.store
+            if path.startswith('/api/discovery') and not self.LOCAL_ONLY:
+                return self.send({'error': '路径不存在'}, 404)
             if not isinstance(data, dict):
                 raise ValueError('请求须为 JSON 对象')
             if path in ['/api/import', '/api/import-preview']:
@@ -311,6 +322,14 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/drafts':
                 options = {'recipient': data['recipient']} if 'recipient' in data else {}
                 result = store.save_draft(int(data['id']), data.get('subject'), data.get('body'), **options)
+            elif path == '/api/discovery':
+                result = store.discovery_discover(data.get('source', ''))
+            elif path == '/api/discovery/recheck':
+                result = store.discovery_recheck(data.get('ids'))
+            elif path == '/api/discovery/ignore':
+                result = store.discovery_set_status(data.get('ids') or [], 'ignored')
+            elif path == '/api/discovery/enqueue':
+                result = store.discovery_enqueue(data.get('ids') or [])
             elif path == '/api/reply':
                 import html
 

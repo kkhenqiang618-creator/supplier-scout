@@ -29,6 +29,8 @@ def context():
 
 
 class CloudBusinessHandler(Handler):
+    LOCAL_ONLY = False
+
     @property
     def store(self):
         username = self.auth_session['username']

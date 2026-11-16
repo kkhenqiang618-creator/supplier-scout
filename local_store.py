@@ -26,7 +26,7 @@ from entry_recovery import validate_entry_url, canonical_url
 from importers import prepare_rows
 from model_service import ModelService
 
-LOCAL_SCHEMA_VERSION = 2
+LOCAL_SCHEMA_VERSION = 3
 
 
 class Store:
@@ -53,6 +53,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,supplier_id INTEGER,mode TEXT,message TEXT,created_at TEXT);
             CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY,supplier_id INTEGER,mode TEXT,offers TEXT,created_at TEXT);
             CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY,supplier_id INTEGER UNIQUE,subject TEXT,body TEXT,created_at TEXT);
+            CREATE TABLE IF NOT EXISTS discovery_candidates(id INTEGER PRIMARY KEY,host TEXT NOT NULL UNIQUE,source_url TEXT NOT NULL DEFAULT '',discovered_at TEXT NOT NULL,is_newapi INTEGER NOT NULL DEFAULT 0,k31 TEXT NOT NULL DEFAULT '[]',selfhost_label TEXT NOT NULL DEFAULT '',selfhost_sentence TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',probe TEXT NOT NULL DEFAULT '{}',updated_at TEXT);
             ''')
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version > LOCAL_SCHEMA_VERSION:
@@ -415,6 +416,166 @@ class Store:
             note += '，其中 ' + str(archived) + ' 条网址已归档，可在「已归档」中恢复'
         self.event(note)
         return {'added': added, 'duplicates': skipped, 'archived': archived}
+
+    @staticmethod
+    def _discovery_row(row):
+        def decode(value, fallback):
+            if not value:
+                return fallback
+            try:
+                return load_json(value, fallback)
+            except ValueError:
+                return fallback
+
+        probe = decode(row['probe'], {})
+        item = dict(probe) if isinstance(probe, dict) else {}
+        item.update(
+            id=row['id'],
+            host=row['host'],
+            source_url=row['source_url'],
+            discovered_at=row['discovered_at'],
+            is_newapi=bool(row['is_newapi']),
+            k31=decode(row['k31'], []),
+            selfhost_label=row['selfhost_label'] or '',
+            selfhost_sentence=row['selfhost_sentence'] or '',
+            status=row['status'],
+            updated_at=row['updated_at'] or '',
+        )
+        item['host'] = row['host']
+        return item
+
+    def discovery_hosts(self):
+        with self.connect() as db:
+            return {row['host'] for row in db.execute('SELECT host FROM discovery_candidates')}
+
+    def supplier_hosts(self):
+        from discovery import canonical_host
+
+        with self.connect() as db:
+            return {
+                canonical_host(row['url'])
+                for row in db.execute('SELECT url FROM suppliers WHERE mode="real"')
+            }
+
+    def discovery_list(self):
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM discovery_candidates
+                ORDER BY (k31 IS NULL OR k31='[]'), discovered_at DESC, id DESC"""
+            ).fetchall()
+        return [self._discovery_row(row) for row in rows]
+
+    def _save_discovery(self, probes, source_url=None):
+        """Upsert probe results; an existing host keeps its state and first discovery date."""
+        saved = 0
+        with self.lock, self.connect(write=True) as db:
+            for probe in probes:
+                if not probe.get('host'):
+                    continue
+                row = db.execute(
+                    'SELECT id FROM discovery_candidates WHERE host=?', (probe['host'],)
+                ).fetchone()
+                if row:
+                    db.execute(
+                        """UPDATE discovery_candidates SET source_url=COALESCE(?,source_url),
+                        is_newapi=?,k31=?,selfhost_label=?,selfhost_sentence=?,probe=?,updated_at=?
+                        WHERE id=?""",
+                        (
+                            source_url,
+                            int(bool(probe.get('is_newapi'))),
+                            encode(probe.get('k31') or []),
+                            probe.get('selfhost_label') or '',
+                            probe.get('selfhost_sentence') or '',
+                            encode(probe),
+                            now(),
+                            row['id'],
+                        ),
+                    )
+                else:
+                    db.execute(
+                        """INSERT INTO discovery_candidates(host,source_url,discovered_at,
+                        is_newapi,k31,selfhost_label,selfhost_sentence,status,probe,updated_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            probe['host'],
+                            source_url or '',
+                            now(),
+                            int(bool(probe.get('is_newapi'))),
+                            encode(probe.get('k31') or []),
+                            probe.get('selfhost_label') or '',
+                            probe.get('selfhost_sentence') or '',
+                            'new',
+                            encode(probe),
+                            now(),
+                        ),
+                    )
+                saved += 1
+        return saved
+
+    def discovery_discover(self, source):
+        """Follow one pasted page, drop known suppliers, probe the rest read-only."""
+        import discovery
+
+        found = discovery.discover(source)
+        known = self.supplier_hosts()
+        existing = self.discovery_hosts()
+        targets = [host for host in found['hosts'] if host and host not in known]
+        self._save_discovery(discovery.probe_hosts(targets), found['source_url'])
+        return {
+            'source_url': found['source_url'],
+            'found_hosts': len(found['hosts']),
+            'known_hosts': len(found['hosts']) - len(targets),
+            'new_hosts': len([host for host in targets if host not in existing]),
+            'candidates': self.discovery_list(),
+        }
+
+    def discovery_recheck(self, ids=None):
+        """Re-probe hosts already in the list; state is never reset by a recheck."""
+        import discovery
+
+        rows = self.discovery_list()
+        if ids:
+            wanted = {int(value) for value in ids}
+            rows = [row for row in rows if row['id'] in wanted]
+        self._save_discovery(discovery.probe_hosts([row['host'] for row in rows]))
+        return {'checked': len(rows), 'candidates': self.discovery_list()}
+
+    def discovery_set_status(self, ids, status):
+        if status not in ('new', 'ignored'):
+            raise ValueError('发现状态无效')
+        wanted = [int(value) for value in ids]
+        if not wanted:
+            raise ValueError('请选择要处理的站点')
+        with self.lock, self.connect(write=True) as db:
+            db.execute(
+                'UPDATE discovery_candidates SET status=?,updated_at=? WHERE id IN ('
+                + ','.join('?' for _ in wanted)
+                + ')',
+                (status, now(), *wanted),
+            )
+        return {'ok': True, 'status': status, 'ids': wanted}
+
+    def discovery_enqueue(self, ids):
+        """Add the checked hosts to the supplier list through the normal import path."""
+        wanted = [int(value) for value in ids]
+        if not wanted:
+            raise ValueError('请选择要加入名单的站点')
+        rows = [row for row in self.discovery_list() if row['id'] in set(wanted)]
+        if not rows:
+            raise ValueError('找不到这些发现记录')
+        result = self.import_rows([{'url': 'https://' + row['host'] + '/'} for row in rows])
+        with self.lock, self.connect(write=True) as db:
+            db.execute(
+                'UPDATE discovery_candidates SET status=?,updated_at=? WHERE id IN ('
+                + ','.join('?' for _ in rows)
+                + ')',
+                ('enqueued', now(), *[row['id'] for row in rows]),
+            )
+        return {
+            'added': result['added'],
+            'duplicates': result['duplicates'],
+            'candidates': self.discovery_list(),
+        }
 
     def save_result(self, sid, result):
         with self.lock:
