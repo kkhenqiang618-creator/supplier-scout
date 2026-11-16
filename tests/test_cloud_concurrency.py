@@ -117,6 +117,9 @@ class CloudConcurrencyTests(unittest.TestCase):
             def for_user(self, username):
                 return self
 
+            def record_worker_status(self, status):
+                pass  # The status thread is covered in test_cloud_worker_status.
+
         def execute(store, job, owner, shutdown):
             if len(owners) == 2:
                 shutdown.set()

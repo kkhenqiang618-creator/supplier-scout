@@ -49,6 +49,53 @@ __all__ = [
 
 HEARTBEAT_INTERVAL = 5
 HEARTBEAT_GRACE = 35
+# How often the daemon reports itself. Small enough that the page notices a dead worker within
+# two minutes, large enough that an idle worker costs one small UPDATE per 10 seconds.
+STATUS_INTERVAL = 10
+STATUS = {
+    'started_at': 0.0,
+    'state': 'starting',
+    'job_id': '',
+    'job_owner': '',
+    'site': '',
+    'error': '',
+    'version': '',
+}
+
+
+def note_activity(message):
+    """Remember what the worker is doing now; the status thread publishes it every STATUS_INTERVAL."""
+    STATUS['site'] = str(message)[:200]
+
+
+def failure_label(error):
+    """Only the class name: driver messages can carry the connection string or key material."""
+    return type(error).__name__
+
+
+def publish_status(store):
+    store.record_worker_status(dict(STATUS))
+
+
+def status_loop(store, shutdown):
+    """Keep saying the daemon is alive, even while idle, so a stuck queue shows why."""
+    failures = 0
+    while not shutdown.is_set():
+        try:
+            publish_status(store)
+            failures = 0
+        except Exception as error:
+            failures += 1
+            if failures == 1:
+                print(
+                    'Worker status write failed: '
+                    + failure_label(error)
+                    + ': apply migrations/postgres/0003_worker_status.sql',
+                    flush=True,
+                )
+        shutdown.wait(STATUS_INTERVAL)
+
+
 PROXY_VARS = ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'https_proxy', 'http_proxy', 'all_proxy']
 PROBE_PADDING = (
     '这是一段用于检测云端网络上传能力的填充文本，请忽略。' * 380
@@ -196,6 +243,7 @@ class CloudBatchTarget:
 
     def log(self, message, row=None):
         # Step logs only update progress; batch-level job_log also writes an event.
+        note_activity(message)
         if self.stop.is_set():
             return
         try:
@@ -351,6 +399,7 @@ def execute_job(store, job, owner, shutdown):
     target = CloudBatchTarget(store, job, owner, stop)
 
     def job_log(message):
+        note_activity(message)
         if stop.is_set():
             return
         try:
@@ -410,14 +459,20 @@ def execute_job(store, job, owner, shutdown):
         heartbeat.join(timeout=6)
 
 
-def run_once(store, shutdown):
+def run_once(store, shutdown, status=None):
     """Claim and run at most one queued job. Returns True when a job was handled."""
+    status = STATUS if status is None else status
     owner = uuid.uuid4().hex
     job = store.claim_job(owner)
     if not job:
+        status.update(state='idle', job_id='', job_owner='', site='')
         return False
     if job.get('owner'):
-        execute_job(store.for_user(job['owner']), job, owner, shutdown)
+        status.update(state='running', job_id=str(job['id']), job_owner=str(job['owner']), site='', error='')
+        try:
+            execute_job(store.for_user(job['owner']), job, owner, shutdown)
+        finally:
+            status.update(state='idle', job_id='', job_owner='', site='')
     # No requested_by means no account context: never run it under the system store, where
     # the database default would attribute that member's results to 小姜.
     else:
@@ -430,6 +485,12 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: shutdown.set())
     signal.signal(signal.SIGINT, lambda *_: shutdown.set())
     store = PostgresStore()
+    STATUS.update(
+        started_at=time.time(),
+        state='idle',
+        version=os.environ.get('VERCEL_DEPLOYMENT_ID', '') or 'local',
+    )
+    threading.Thread(target=status_loop, args=(store, shutdown), daemon=True).start()
     idle_since = time.monotonic()
     print('Supplier Scout cloud worker ready', flush=True)
     while not shutdown.is_set():
@@ -443,8 +504,10 @@ def main():
                     break
                 shutdown.wait(3)
         except Exception as error:
-            # Provider config and DB URLs are never logged.
-            print('Worker cycle failed: ' + type(error).__name__, flush=True)
+            # Provider config and DB URLs are never logged, and never stored either: the class
+            # name alone is what other members may see on the status line.
+            STATUS['error'] = failure_label(error)
+            print('Worker cycle failed: ' + failure_label(error), flush=True)
             shutdown.wait(5)
 
 

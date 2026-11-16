@@ -118,6 +118,9 @@ class ScopedWorkspaceTests(unittest.TestCase):
 
                 class ScopedSQL:
                     def execute(self, query, params=()):
+                        if 'cloud_worker_status' in query:
+                            # The fixture has no worker-status table; the page shows 后台状态未知.
+                            return db.conn.execute('SELECT 0 AS present')
                         if 'jsonb_path_query_array' in query:
                             query = 'SELECT * FROM suppliers ORDER BY id'
                         if query.startswith('SELECT') and any(

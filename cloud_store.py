@@ -30,9 +30,21 @@ IDLE = {
     'current': '',
 }
 ACTIVE = ('queued', 'running', 'stopping')
+# One row per browser-worker process. The worker writes every 10 seconds even when idle, so a
+# batch stuck at "等待云端浏览器" can be told apart from a daemon that never started. The row holds
+# no member business data, so the table has no owner column and no row-level security.
+WORKER_STATUS_ID = 'browser-worker'
+WORKER_ONLINE_GRACE = 90
 # Pre-isolation rows belong to this account. Writes made without a logged-in user must name an
 # owner explicitly: the tenant column is NOT NULL with no default outside a user context.
 LEGACY_OWNER = '小姜'
+
+
+def worker_view(worker, admin):
+    """Members see whether the shared browser is alive; only admins see whose site it is on."""
+    if not worker or admin:
+        return worker
+    return {key: value for key, value in worker.items() if key not in ('job_id', 'job_owner', 'site')}
 
 
 class LostLease(RuntimeError):
@@ -413,6 +425,7 @@ class PostgresStore(Store):
     def state(self, full=True):
         if full:
             data = Store.state(self)
+            data['worker'] = self.worker_status()
         else:
             with self.lock, self.connect() as db:
                 projection = """SELECT id,name,url,mode,status,reason,contacts,notes,checked_at,created_at,contact_status,contact_checked_at,warnings,
@@ -442,6 +455,7 @@ class PostgresStore(Store):
                         for row in db.execute('SELECT * FROM drafts ORDER BY id DESC')
                     ],
                     'job': self.job,
+                    'worker': self.worker_status(),
                     'model_service': self.model_service.public(),
                     'integrations': {
                         'email': False,
@@ -459,6 +473,7 @@ class PostgresStore(Store):
             is_admin=getattr(self, 'is_admin', False),
             limits={'file_bytes': 3 * 1024 * 1024},
         )
+        data['worker'] = worker_view(data.get('worker'), data['is_admin'])
         return data
 
     def team_overview(self, names):
@@ -670,6 +685,63 @@ class PostgresStore(Store):
                 "UPDATE cloud_jobs SET status='failed',lease_owner=NULL,lease_until=NULL,updated_at=now(),state=state||? WHERE id=?",
                 (Jsonb({'current': '', 'error': message, 'stage': '云端批次未启动：缺少归属账号'}), job_id),
             )
+
+    def record_worker_status(self, status):
+        """Upsert the browser-worker row from the worker's system context.
+
+        Deliberately does not take WRITE_LOCK: a 10-second status beat must never queue behind
+        a job commit. A missing 0003 migration raises, and the worker keeps running without it.
+        """
+        values = (
+            WORKER_STATUS_ID,
+            float(status.get('started_at') or 0),
+            str(status.get('state') or 'unknown')[:40],
+            str(status.get('job_id') or '')[:80],
+            str(status.get('job_owner') or '')[:80],
+            str(status.get('site') or '')[:200],
+            str(status.get('error') or '')[:300],
+            str(status.get('version') or '')[:120],
+        )
+        with self.database.transaction() as db:
+            db.execute(
+                'INSERT INTO cloud_worker_status(id,started_at,heartbeat_at,state,job_id,job_owner,site,error_text,version)'
+                ' VALUES (%s,to_timestamp(%s),now(),%s,%s,%s,%s,%s,%s)'
+                ' ON CONFLICT(id) DO UPDATE SET started_at=EXCLUDED.started_at,heartbeat_at=now(),state=EXCLUDED.state,'
+                ' job_id=EXCLUDED.job_id,job_owner=EXCLUDED.job_owner,site=EXCLUDED.site,'
+                ' error_text=EXCLUDED.error_text,version=EXCLUDED.version',
+                values,
+            )
+
+    def worker_status(self):
+        """What the browser daemon last reported, computed against the server clock."""
+        with self.connect() as db:
+            present = db.execute(
+                "SELECT to_regclass('scout_private.cloud_worker_status') IS NOT NULL AS present"
+            ).fetchone()['present']
+            if not present:
+                return {'available': False}
+            row = db.execute(
+                'SELECT state,job_id,job_owner,site,error_text,version,'
+                'EXTRACT(EPOCH FROM now()-started_at) AS uptime,EXTRACT(EPOCH FROM now()-heartbeat_at) AS age'
+                ' FROM cloud_worker_status WHERE id=%s',
+                (WORKER_STATUS_ID,),
+            ).fetchone()
+        if not row:
+            return {'available': True, 'seen': False}
+        age = max(0, int(float(row['age'])))
+        return {
+            'available': True,
+            'seen': True,
+            'online': age <= WORKER_ONLINE_GRACE,
+            'last_seen_seconds': age,
+            'uptime_seconds': max(0, int(float(row['uptime']))),
+            'state': row['state'],
+            'job_id': row['job_id'],
+            'job_owner': row['job_owner'],
+            'site': row['site'],
+            'error': row['error_text'],
+            'version': row['version'],
+        }
 
     @contextlib.contextmanager
     def fenced(self, job_id, owner):

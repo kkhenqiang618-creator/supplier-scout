@@ -57,3 +57,15 @@ Then check all three points:
 
 After the preview passes, take a backup and run the same two files (in order,
 with `-1`) on production, after deploying the code that reads both shapes.
+
+## Worker status (0003)
+
+`0003_worker_status.sql` adds `scout_private.cloud_worker_status`, the single row the
+`browser-worker` daemon overwrites every 10 seconds. The page uses it to show whether the
+后台进程 is online and where it stopped, which is the only way to tell a stuck queue apart
+from a daemon that never started (Vercel's free plan keeps no history logs).
+
+It is additive and needs no data backfill: run it once, in order after 0001 and 0002, with
+`-1`. Until it runs, the rest of the app works unchanged, the worker only prints
+`Worker status write failed: … 0003_worker_status.sql` once, and the page shows
+后台状态未知.
