@@ -11,6 +11,7 @@ CREATE UNIQUE INDEX cloud_jobs_one_active ON scout_private.cloud_jobs((true)) WH
 CREATE INDEX cloud_jobs_ready ON scout_private.cloud_jobs(status,lease_until);
 CREATE TABLE scout_private.sessions(token_hash TEXT PRIMARY KEY,username TEXT NOT NULL,expires_at DOUBLE PRECISION NOT NULL);
 CREATE TABLE scout_private.login_attempts(key TEXT PRIMARY KEY,failures INTEGER NOT NULL DEFAULT 0,window_start DOUBLE PRECISION NOT NULL);
+CREATE TABLE scout_private.cloud_worker_status(id TEXT PRIMARY KEY,started_at TIMESTAMPTZ NOT NULL,heartbeat_at TIMESTAMPTZ NOT NULL,state TEXT NOT NULL DEFAULT 'unknown',job_id TEXT NOT NULL DEFAULT '',job_owner TEXT NOT NULL DEFAULT '',site TEXT NOT NULL DEFAULT '',error_text TEXT NOT NULL DEFAULT '',version TEXT NOT NULL DEFAULT '');
 
 -- Provision the scout_app login role with an out-of-band random password first.
 GRANT USAGE ON SCHEMA scout_private TO scout_app;
