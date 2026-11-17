@@ -15,6 +15,10 @@ turn into an outage, and the old code path keeps working.
 Only additive, non-rewriting migrations belong here.  `0002_json_and_time_columns`
 converts column types and rewrites table contents, so it stays a manual,
 maintenance-window step.
+
+Creating the objects needs the app role to own the schema (or to hold CREATE on it),
+which the runtime role `scout_app` does not: a missing object is then reported with
+the exact GRANT that unblocks it, and the request carries on instead of failing.
 """
 
 import os
@@ -171,6 +175,15 @@ def _apply(database, pending):
                 connection.execute('RELEASE SAVEPOINT scout_migration')
             except psycopg.Error as error:
                 connection.execute('ROLLBACK TO SAVEPOINT scout_migration')
+                if isinstance(error, psycopg.errors.InsufficientPrivilege):
+                    print(
+                        '[schema] %s not applied: the app role may not change the schema.'
+                        ' Run migrations/postgres/%s.sql as the database owner, or grant it:'
+                        ' GRANT CREATE ON SCHEMA %s TO scout_app'
+                        % (migration.version, migration.version, SCHEMA),
+                        flush=True,
+                    )
+                    continue
                 print('[schema] %s failed: %s' % (migration.version, error), flush=True)
                 continue
             _APPLIED.add(migration.version)
