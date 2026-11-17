@@ -25,14 +25,16 @@ from collection_diagnostics import collection_diagnostics
 from entry_recovery import validate_entry_url, canonical_url
 from importers import prepare_rows
 from model_service import ModelService
+from search_service import SearchService
 
-LOCAL_SCHEMA_VERSION = 3
+LOCAL_SCHEMA_VERSION = 4
 
 
 class Store:
     def __init__(self, path, seed=True):
         self.path = str(path)
         self.model_service = ModelService(Path(path).with_name('model-service.json'))
+        self.search_service = SearchService(Path(path).with_name('search-service.json'))
         self.lock = threading.RLock()
         self.job_lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -53,7 +55,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,supplier_id INTEGER,mode TEXT,message TEXT,created_at TEXT);
             CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY,supplier_id INTEGER,mode TEXT,offers TEXT,created_at TEXT);
             CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY,supplier_id INTEGER UNIQUE,subject TEXT,body TEXT,created_at TEXT);
-            CREATE TABLE IF NOT EXISTS discovery_candidates(id INTEGER PRIMARY KEY,host TEXT NOT NULL UNIQUE,source_url TEXT NOT NULL DEFAULT '',discovered_at TEXT NOT NULL,is_newapi INTEGER NOT NULL DEFAULT 0,k31 TEXT NOT NULL DEFAULT '[]',selfhost_label TEXT NOT NULL DEFAULT '',selfhost_sentence TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',probe TEXT NOT NULL DEFAULT '{}',updated_at TEXT);
+            CREATE TABLE IF NOT EXISTS discovery_candidates(id INTEGER PRIMARY KEY,host TEXT NOT NULL UNIQUE,source_url TEXT NOT NULL DEFAULT '',discovered_at TEXT NOT NULL,is_newapi INTEGER NOT NULL DEFAULT 0,k31 TEXT NOT NULL DEFAULT '[]',selfhost_label TEXT NOT NULL DEFAULT '',selfhost_sentence TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',probe TEXT NOT NULL DEFAULT '{}',found_by TEXT NOT NULL DEFAULT '',updated_at TEXT);
             ''')
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version > LOCAL_SCHEMA_VERSION:
@@ -70,6 +72,11 @@ class Store:
                 ]:
                     if column not in columns:
                         db.execute('ALTER TABLE suppliers ADD COLUMN ' + column + ' ' + definition)
+                candidates = {r[1] for r in db.execute('PRAGMA table_info(discovery_candidates)')}
+                if 'found_by' not in candidates:
+                    db.execute(
+                        "ALTER TABLE discovery_candidates ADD COLUMN found_by TEXT NOT NULL DEFAULT ''"
+                    )
                 db.execute('PRAGMA user_version=%d' % LOCAL_SCHEMA_VERSION)
             for row in db.execute(
                 "SELECT id,contacts FROM suppliers WHERE contact_status='not_started'"
@@ -368,6 +375,7 @@ class Store:
                     ],
                     'job': dict(self.job),
                     'model_service': self.model_service.public(),
+                    'search_service': self.search_service.public(),
                     'integrations': {
                         'email': False,
                         'feishu': False,
@@ -439,6 +447,7 @@ class Store:
             selfhost_label=row['selfhost_label'] or '',
             selfhost_sentence=row['selfhost_sentence'] or '',
             status=row['status'],
+            found_by=row['found_by'] or '',
             updated_at=row['updated_at'] or '',
         )
         item['host'] = row['host']
@@ -465,7 +474,7 @@ class Store:
             ).fetchall()
         return [self._discovery_row(row) for row in rows]
 
-    def _save_discovery(self, probes, source_url=None):
+    def _save_discovery(self, probes, source_url=None, found_by=''):
         """Upsert probe results; an existing host keeps its state and first discovery date."""
         saved = 0
         with self.lock, self.connect(write=True) as db:
@@ -475,18 +484,22 @@ class Store:
                 row = db.execute(
                     'SELECT id FROM discovery_candidates WHERE host=?', (probe['host'],)
                 ).fetchone()
+                origin = probe.get('source_url') or source_url
+                discovered_by = probe.get('found_by') or found_by
                 if row:
                     db.execute(
                         """UPDATE discovery_candidates SET source_url=COALESCE(?,source_url),
-                        is_newapi=?,k31=?,selfhost_label=?,selfhost_sentence=?,probe=?,updated_at=?
+                        is_newapi=?,k31=?,selfhost_label=?,selfhost_sentence=?,probe=?,
+                        found_by=CASE WHEN found_by='' THEN ? ELSE found_by END,updated_at=?
                         WHERE id=?""",
                         (
-                            source_url,
+                            origin,
                             int(bool(probe.get('is_newapi'))),
                             encode(probe.get('k31') or []),
                             probe.get('selfhost_label') or '',
                             probe.get('selfhost_sentence') or '',
                             encode(probe),
+                            discovered_by,
                             now(),
                             row['id'],
                         ),
@@ -494,11 +507,11 @@ class Store:
                 else:
                     db.execute(
                         """INSERT INTO discovery_candidates(host,source_url,discovered_at,
-                        is_newapi,k31,selfhost_label,selfhost_sentence,status,probe,updated_at)
-                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        is_newapi,k31,selfhost_label,selfhost_sentence,status,probe,found_by,updated_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             probe['host'],
-                            source_url or '',
+                            origin or '',
                             now(),
                             int(bool(probe.get('is_newapi'))),
                             encode(probe.get('k31') or []),
@@ -506,6 +519,7 @@ class Store:
                             probe.get('selfhost_sentence') or '',
                             'new',
                             encode(probe),
+                            discovered_by,
                             now(),
                         ),
                     )
@@ -520,12 +534,90 @@ class Store:
         known = self.supplier_hosts()
         existing = self.discovery_hosts()
         targets = [host for host in found['hosts'] if host and host not in known]
-        self._save_discovery(discovery.probe_hosts(targets), found['source_url'])
+        self._save_discovery(
+            discovery.probe_hosts(targets), found['source_url'], '粘贴：' + str(source)[:120]
+        )
         return {
             'source_url': found['source_url'],
             'found_hosts': len(found['hosts']),
             'known_hosts': len(found['hosts']) - len(targets),
             'new_hosts': len([host for host in targets if host not in existing]),
+            'candidates': self.discovery_list(),
+        }
+
+    def discovery_run(self, sources=None, queries=None):
+        """One round of P25: probe known hosts, search the keywords, snowball once."""
+        import discovery
+
+        service = self.search_service.read()
+        exclude = service.get('exclude') or []
+        keywords = [
+            str(query).strip()
+            for query in (queries if queries is not None else service.get('queries') or [])
+            if str(query).strip()
+        ]
+        known = self.supplier_hosts()
+        existing = self.discovery_hosts()
+        report = {
+            'probed': 0,
+            'search_calls': 0,
+            'search_hosts': 0,
+            'snowball_pages': 0,
+            'snowball_hosts': 0,
+            'skipped': [],
+            'errors': [],
+        }
+        probes = []
+        if existing:
+            probes.extend(discovery.probe_hosts(sorted(existing)))
+            report['probed'] = len(probes)
+        found = []
+        api_key = service.get('api_key') or ''
+        if service.get('key_error'):
+            report['skipped'].append('搜索：本机保存的 Key 无法解密，请重新填写')
+        elif not api_key:
+            report['skipped'].append('搜索：未接入 DeepSeek 搜索 Key，已跳过')
+        elif not keywords:
+            report['skipped'].append('搜索：关键词表为空，已跳过')
+        else:
+            result = discovery.search_round(keywords, api_key, exclude=exclude)
+            report['search_calls'] = result['calls']
+            report['search_hosts'] = len(result['hosts'])
+            report['errors'].extend(result['errors'])
+            found.extend(result['hosts'])
+        pages = [str(source).strip() for source in (sources or []) if str(source).strip()]
+        pages.extend(item['source_url'] for item in found if item.get('source_url'))
+        snowball = discovery.snowball_hosts(pages, exclude=exclude)
+        report['snowball_pages'] = snowball['pages']
+        report['snowball_hosts'] = len(snowball['hosts'])
+        report['errors'].extend(snowball['errors'])
+        found.extend(snowball['hosts'])
+        targets, seen, origins = [], set(), {}
+        for item in found:
+            host = item['host']
+            if host in seen or host in known or discovery.is_excluded(host, exclude):
+                continue
+            seen.add(host)
+            origins[host] = item
+            targets.append(host)
+            if len(targets) >= discovery.MAX_HOSTS:
+                break
+        for probe in discovery.probe_hosts(targets):
+            origin = origins.get(probe['host'], {})
+            probe['found_by'] = origin.get('found_by', '')
+            probe['source_url'] = origin.get('source_url', '')
+            probes.append(probe)
+        self._save_discovery(probes)
+        return {
+            'probed': report['probed'],
+            'search_calls': report['search_calls'],
+            'search_hosts': report['search_hosts'],
+            'snowball_pages': report['snowball_pages'],
+            'snowball_hosts': report['snowball_hosts'],
+            'new_hosts': len([host for host in targets if host not in existing]),
+            'found_hosts': len(found),
+            'skipped': report['skipped'],
+            'errors': report['errors'][:10],
             'candidates': self.discovery_list(),
         }
 

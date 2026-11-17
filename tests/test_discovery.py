@@ -102,6 +102,10 @@ def site_pages(alpha_home=HOMEPAGE):
         'https://gamma.example/': '<html><body>普通网站</body></html>',
         'https://gamma.example/api/status': json.dumps({'ok': True, 'version': '1.0'}),
         'https://epsilon.example/robots.txt': 'User-agent: *\nDisallow: /\n',
+        'https://delta.example/robots.txt': 'User-agent: *\nAllow: /',
+        'https://delta.example/': '<html><body>delta 站，只做中转</body></html>',
+        'https://delta.example/api/status': status('Delta API'),
+        'https://delta.example/api/pricing': PRICING,
     }
 
 
@@ -217,6 +221,61 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertIn('robots.txt 无法确认允许访问', result['error'])
 
 
+class DiscoverySearchTests(unittest.TestCase):
+    def test_hosts_from_text_keeps_absolute_urls_only(self):
+        text = '见 https://a.example/x 和 http://b.example/ ，not.example 不算 https://a.example/again'
+        self.assertEqual(discovery.hosts_from_text(text), ['a.example', 'b.example'])
+
+    def test_excluded_sites_cover_subdomains(self):
+        exclude = ['zhihu.com', 'github.com']
+        self.assertTrue(discovery.is_excluded('www.zhihu.com', exclude))
+        self.assertTrue(discovery.is_excluded('github.com', exclude))
+        self.assertFalse(discovery.is_excluded('notzhihu.com', exclude))
+        self.assertFalse(discovery.is_excluded('a.example', exclude))
+
+    def test_search_request_checks_the_keyword_length(self):
+        with self.assertRaises(ValueError):
+            discovery.search_request('', 'key')
+        with self.assertRaises(ValueError):
+            discovery.search_request('长' * 129, 'key')
+
+    def test_search_round_collects_hosts_and_stops_at_twenty(self):
+        calls = []
+
+        def fake(query, key, count=50):
+            calls.append(query)
+            return {'results': [{'url': 'https://h%d.example/' % len(calls), 'content': ''}]}
+
+        with mock.patch.object(discovery, 'search_request', fake):
+            result = discovery.search_round(['k%d' % index for index in range(25)], 'key')
+        self.assertEqual(result['calls'], 20)
+        self.assertEqual(len(calls), 20)
+        self.assertEqual(len(result['hosts']), 20)
+        self.assertEqual(result['hosts'][0]['found_by'], '搜索：k0')
+
+    def test_search_round_reports_an_error_and_continues(self):
+        def fake(query, key, count=50):
+            if query == 'bad':
+                raise ValueError('DeepSeek 搜索失败（HTTP 429）：限流')
+            return {'results': [{'url': 'https://good.example/', 'content': ''}]}
+
+        with mock.patch.object(discovery, 'search_request', fake):
+            result = discovery.search_round(['bad', 'good'], 'key')
+        self.assertEqual(result['calls'], 2)
+        self.assertEqual([host['host'] for host in result['hosts']], ['good.example'])
+        self.assertIn('429', result['errors'][0])
+
+    def test_snowball_follows_one_level_and_skips_excluded(self):
+        site = FakeSite(site_pages())
+        with mock.patch.object(discovery, 'fetch_text', site.fetch), mock.patch.object(
+            discovery, 'validate_url', lambda url: url
+        ):
+            result = discovery.snowball_hosts(['https://directory.example/'], exclude=['beta.example'])
+        self.assertEqual(result['pages'], 1)
+        self.assertEqual([host['host'] for host in result['hosts']], ['alpha.example', 'gamma.example', 'epsilon.example'])
+        self.assertTrue(result['hosts'][0]['found_by'].startswith('滚雪球：'))
+
+
 class DiscoveryStoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -301,15 +360,80 @@ class DiscoveryStoreTests(unittest.TestCase):
             'ignored',
         )
 
+    def test_search_results_become_candidates_with_their_keyword(self):
+        self.store.search_service.save({'api_key': 'test-key', 'queries': ['kimi-k3.1-pro API 中转 lang:zh']})
+        payload = {
+            'results': [
+                {
+                    'url': 'https://delta.example/',
+                    'title': 'Delta API',
+                    'content': '充值页 https://delta.example/pay 也有说明',
+                },
+                {'url': 'https://zhihu.com/question/1', 'content': '知乎讨论'},
+            ]
+        }
+        with mock.patch.object(discovery, 'fetch_text', self.site.fetch), mock.patch.object(
+            discovery, 'validate_url', lambda url: url
+        ), mock.patch.object(
+            discovery, 'search_request', mock.Mock(side_effect=lambda query, key, count=50: payload)
+        ) as fake:
+            result = self.store.discovery_run()
+        self.assertEqual(fake.call_count, 1)
+        self.assertEqual(result['search_calls'], 1)
+        hosts = [row['host'] for row in result['candidates']]
+        self.assertIn('delta.example', hosts)
+        self.assertNotIn('zhihu.com', hosts)
+        row = next(item for item in result['candidates'] if item['host'] == 'delta.example')
+        self.assertEqual(row['found_by'], '搜索：kimi-k3.1-pro API 中转 lang:zh')
+        self.assertTrue(row['found_by'].startswith('搜索：'))
+
+    def test_run_without_search_key_skips_search(self):
+        with mock.patch.object(discovery, 'fetch_text', self.site.fetch), mock.patch.object(
+            discovery, 'validate_url', lambda url: url
+        ):
+            result = self.store.discovery_run()
+        self.assertEqual(result['search_calls'], 0)
+        self.assertIn('未接入 DeepSeek 搜索 Key', result['skipped'][0])
+        self.assertEqual(result['candidates'], [])
+
+    def test_discover_records_the_pasted_source(self):
+        self.discover()
+        row = next(item for item in self.store.discovery_list() if item['host'] == 'gamma.example')
+        self.assertEqual(row['found_by'], '粘贴：directory.example')
+
     def test_handler_is_local_only_by_default(self):
         self.assertTrue(web_app.Handler.LOCAL_ONLY)
 
     def test_existing_workspace_gains_the_table(self):
         Store(self.path, seed=False)
         with self.store.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
             columns = {row[1] for row in db.execute('PRAGMA table_info(discovery_candidates)')}
-        self.assertTrue({'host', 'source_url', 'k31', 'status'} <= columns)
+        self.assertTrue({'host', 'source_url', 'k31', 'status', 'found_by'} <= columns)
+
+    def test_old_discovery_table_gains_found_by_keeping_rows(self):
+        path = os.path.join(self.tmp.name, 'old.db')
+        import sqlite3
+
+        db = sqlite3.connect(path)
+        db.executescript(
+            '''CREATE TABLE discovery_candidates(id INTEGER PRIMARY KEY,host TEXT NOT NULL UNIQUE,
+            source_url TEXT NOT NULL DEFAULT '',discovered_at TEXT NOT NULL,
+            is_newapi INTEGER NOT NULL DEFAULT 0,k31 TEXT NOT NULL DEFAULT '[]',
+            selfhost_label TEXT NOT NULL DEFAULT '',selfhost_sentence TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'new',probe TEXT NOT NULL DEFAULT '{}',updated_at TEXT);
+            INSERT INTO discovery_candidates(host,discovered_at,status) VALUES('old.example','2026-01-01','ignored');
+            PRAGMA user_version=3;'''
+        )
+        db.commit()
+        db.close()
+        store = Store(path, seed=False)
+        rows = store.discovery_list()
+        self.assertEqual([row['host'] for row in rows], ['old.example'])
+        self.assertEqual(rows[0]['status'], 'ignored')
+        self.assertEqual(rows[0]['found_by'], '')
+        with store.connect() as check:
+            self.assertEqual(check.execute('PRAGMA user_version').fetchone()[0], 4)
 
 
 if __name__ == '__main__':

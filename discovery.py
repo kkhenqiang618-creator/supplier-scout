@@ -1,11 +1,13 @@
 """Read-only discovery of resellers that offer Kimi K3.1 Pro (P25).
 
-Nothing here logs in, registers or posts: the discovery page only takes a source
-page the user pastes, follows its outbound links, and then reads the public
-``/api/status`` and ``/api/pricing`` answers of each host once.
+Nothing here logs in, registers or posts: the discovery page probes the hosts it
+already knows, asks the DeepSeek Search API for pages that resell K3.1 Pro, and
+follows the outbound links of the saved source pages one level deep. Every host
+is then read once through its public ``/api/status`` and ``/api/pricing``.
 
 The module is deliberately free of store access so the network layer can be
-replaced in tests; ``fetch_text`` is the single egress point.
+replaced in tests; ``fetch_text`` and ``search_request`` are the only egress
+points.
 """
 
 import json
@@ -41,6 +43,20 @@ SELFHOST_LABEL = '疑似自部署，需询问'
 
 PRICE_BASIS = '站内标价（按 new-api 倍率换算，未含充值比例和分组倍率）'
 STATUS_FIELDS = ('system_name', 'price', 'quota_per_unit')
+
+# DeepSeek Search (P25 c): one billable call per keyword, at most 20 per round.
+SEARCH_ENDPOINT = 'https://api.deepseek.com/v1/tools/search'
+SEARCH_COUNT = 50
+SEARCH_MAX_CALLS = 20
+SEARCH_TIMEOUT = 60
+SEARCH_QUERY_LIMIT = 128
+SEARCH_LABEL = '搜索：'
+
+# One level of snowballing from saved source pages named in P25 (b).
+SNOWBALL_MAX_PAGES = 12
+
+# Absolute URLs written in page text or returned by the search API.
+TEXT_URL = re.compile(r'https?://[^\s<>"\'`\]\[(){}，。；：！？、]+', re.I)
 
 
 def fetch_text(url):
@@ -242,6 +258,149 @@ def discover(source):
         raise ValueError('robots.txt 不允许访问该来源页')
     body, final = fetch_text(url)
     return {'source_url': final, 'hosts': hosts_from_page(body, final)}
+
+
+def hosts_from_text(text, base_url=''):
+    """Hosts of absolute URLs written inside text (search results or page excerpts)."""
+    hosts, seen = [], set()
+    for match in TEXT_URL.findall(str(text or '')):
+        target = urllib.parse.urljoin(base_url, match) if base_url else match
+        parts = urllib.parse.urlsplit(target)
+        if parts.scheme not in ('http', 'https') or not parts.hostname:
+            continue
+        host = canonical_host(target)
+        if not host or host in seen:
+            continue
+        seen.add(host)
+        hosts.append(host)
+        if len(hosts) >= MAX_HOSTS:
+            break
+    return hosts
+
+
+def is_excluded(host, exclude):
+    """True when the host is one of the common non-supplier sites (or a subdomain)."""
+    name = str(host or '').lower()
+    for item in exclude or ():
+        domain = str(item or '').strip().lower().lstrip('*').lstrip('.')
+        if domain and (name == domain or name.endswith('.' + domain)):
+            return True
+    return False
+
+
+def _http_detail(error):
+    try:
+        raw = error.read(8192).decode('utf-8', errors='replace')
+        detail = json.loads(raw).get('error', {})
+        return str(detail.get('message', detail) if isinstance(detail, dict) else detail)[:200]
+    except Exception:
+        return str(getattr(error, 'reason', '') or '')
+
+
+def search_request(query, api_key, count=SEARCH_COUNT):
+    """One DeepSeek Search call; the only search egress point (replaced in tests)."""
+    text = str(query or '').strip()
+    if not text:
+        raise ValueError('关键词不能为空')
+    if len(text) > SEARCH_QUERY_LIMIT:
+        raise ValueError('关键词不能超过 128 个字符：' + text[:20] + '…')
+    body = json.dumps({'query': text, 'count': int(count), 'need_content': True})
+    request = urllib.request.Request(
+        SEARCH_ENDPOINT,
+        data=body.encode('utf-8'),
+        headers={
+            'Authorization': 'Bearer ' + api_key,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        },
+        method='POST',
+    )
+    from browser_egress import collection_opener
+
+    try:
+        with collection_opener(SafeRedirect) as opener:
+            with opener.open(request, timeout=SEARCH_TIMEOUT) as response:
+                return json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code == 401:
+            # The service echoes a masked key; do not show any of it.
+            raise ValueError('DeepSeek 搜索失败（HTTP 401）：请到「能力接入」核对 DeepSeek 搜索 Key') from None
+        raise ValueError(
+            'DeepSeek 搜索失败（HTTP %d）：%s' % (error.code, _http_detail(error))
+        ) from None
+    except (urllib.error.URLError, OSError) as error:
+        reason = getattr(error, 'reason', error)
+        raise ValueError('DeepSeek 搜索失败：' + (str(reason)[:150] or '网络错误')) from None
+
+
+def search_round(queries, api_key, count=SEARCH_COUNT, max_calls=SEARCH_MAX_CALLS, exclude=()):
+    """Run the keyword table (at most 20 searches) and collect hosts with their source."""
+    found, seen, errors = [], set(), []
+    calls = 0
+    for query in queries or []:
+        if calls >= max_calls:
+            break
+        text = str(query or '').strip()
+        if not text:
+            continue
+        calls += 1
+        try:
+            payload = search_request(text, api_key, count)
+        except ValueError as error:
+            errors.append(str(error))
+            continue
+        results = payload.get('results') if isinstance(payload, dict) else None
+        label = SEARCH_LABEL + text[:60]
+        for item in results if isinstance(results, list) else []:
+            if not isinstance(item, dict):
+                continue
+            page = str(item.get('url') or '').strip()
+            hosts = hosts_from_text(page)
+            hosts.extend(hosts_from_text(item.get('content') or '', page))
+            for host in hosts:
+                if host in seen or is_excluded(host, exclude):
+                    continue
+                if len(found) >= MAX_HOSTS:
+                    break
+                seen.add(host)
+                found.append({'host': host, 'found_by': label, 'source_url': page})
+    return {'calls': calls, 'hosts': found, 'errors': errors}
+
+
+def snowball_hosts(pages, exclude=(), max_pages=SNOWBALL_MAX_PAGES):
+    """Fetch up to 12 saved source pages once and collect their outbound hosts."""
+    unique = []
+    for page in pages or []:
+        page = str(page or '').strip()
+        if page and page not in unique:
+            unique.append(page)
+        if len(unique) >= max_pages:
+            break
+
+    def one(page):
+        try:
+            return discover(page)
+        except Exception as error:
+            return {'error': str(error) or error.__class__.__name__}
+
+    hosts, seen, errors, done = [], set(), [], 0
+    if not unique:
+        return {'pages': 0, 'hosts': hosts, 'errors': errors}
+    workers = max(1, min(MAX_PARALLEL, len(unique)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for page, result in zip(unique, executor.map(one, unique)):
+            if 'error' in result:
+                errors.append(page + '：' + result['error'])
+                continue
+            done += 1
+            for host in result.get('hosts') or []:
+                if host in seen or is_excluded(host, exclude):
+                    continue
+                seen.add(host)
+                hosts.append({'host': host, 'found_by': '滚雪球：' + page[:80], 'source_url': page})
+                if len(hosts) >= MAX_HOSTS:
+                    return {'pages': done, 'hosts': hosts, 'errors': errors}
+    return {'pages': done, 'hosts': hosts, 'errors': errors}
 
 
 def probe_host(host):

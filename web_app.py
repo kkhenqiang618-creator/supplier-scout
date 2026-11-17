@@ -290,6 +290,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = store.model_service.save(data)
             elif path == '/api/model-service/test':
                 result = store.model_service.test()
+            elif path == '/api/search-service':
+                result = store.search_service.save(data)
             elif path == '/api/stop':
                 result = store.stop_job()
             elif path == '/api/run':
@@ -324,6 +326,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = store.save_draft(int(data['id']), data.get('subject'), data.get('body'), **options)
             elif path == '/api/discovery':
                 result = store.discovery_discover(data.get('source', ''))
+            elif path == '/api/discovery/run':
+                result = store.discovery_run(data.get('sources'), data.get('queries'))
             elif path == '/api/discovery/recheck':
                 result = store.discovery_recheck(data.get('ids'))
             elif path == '/api/discovery/ignore':
