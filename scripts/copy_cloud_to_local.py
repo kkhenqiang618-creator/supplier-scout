@@ -1,9 +1,9 @@
 """One-time copy of one account's cloud records into the local SQLite workspace (P28).
 
 The cloud database is only read: every statement the copy issues runs inside a
-non-writing transaction scoped to the requested account, so the ownership rules
-and row-level security decide what is visible instead of being bypassed (business
-rule 1). Model configuration, API keys and login sessions are never copied, and
+non-writing transaction and names the requested account explicitly, so the
+ownership rules and row-level security both decide what is visible instead of
+being bypassed (business rule 1). Model configuration, API keys and login sessions are never copied, and
 the local database is backed up before anything is written. An existing workspace
 that already holds real suppliers is left untouched.
 """
@@ -48,11 +48,15 @@ PAGE_SIZE = 20
 WORKERS = 6
 
 
-def _ids(db, table):
-    return [row['id'] for row in db.execute('SELECT id FROM ' + table + ' ORDER BY id')]
+def _ids(db, table, owner):
+    """Ids this account owns. The owner filter is explicit so a superuser connection (which
+    bypasses the row-level policy) still cannot copy another account's rows (P30)."""
+    return [
+        row['id'] for row in db.execute('SELECT id FROM ' + table + ' WHERE owner = %s ORDER BY id', (owner,))
+    ]
 
 
-def _fetch(db, table, ids):
+def _fetch(db, table, ids, owner):
     """Read the given ids on this connection, in small messages.
 
     Supplier rows carry the collected page snapshots (hundreds of KB each). A single
@@ -64,26 +68,29 @@ def _fetch(db, table, ids):
         chunk = ids[start : start + PAGE_SIZE]
         batch = [
             dict(row)
-            for row in db.execute('SELECT * FROM ' + table + ' WHERE id = ANY(%s) ORDER BY id', (chunk,))
+            for row in db.execute(
+                'SELECT * FROM ' + table + ' WHERE owner = %s AND id = ANY(%s) ORDER BY id',
+                (owner, chunk),
+            )
         ]
         rows.extend(batch)
     return rows
 
 
-def _read_table(db, table, workers=WORKERS):
+def _read_table(db, table, owner, workers=WORKERS):
     with db.transaction(write=False) as conn:
-        ids = _ids(conn, table)
+        ids = _ids(conn, table, owner)
     if not ids:
         return []
     if len(ids) < PAGE_SIZE or workers <= 1:
         with db.transaction(write=False) as conn:
-            return _fetch(conn, table, ids)
+            return _fetch(conn, table, ids, owner)
     buckets = [ids[index::workers] for index in range(workers)]
     results = [None] * workers
 
     def work(index):
         with db.transaction(write=False) as conn:
-            results[index] = _fetch(conn, table, buckets[index])
+            results[index] = _fetch(conn, table, buckets[index], owner)
 
     threads = [threading.Thread(target=work, args=(index,)) for index in range(workers)]
     for thread in threads:
@@ -95,11 +102,11 @@ def _read_table(db, table, workers=WORKERS):
     return rows
 
 
-def read_cloud(store):
+def read_cloud(store, owner):
     """Everything the local workspace needs, read-only and scoped to the store's account."""
     rows = {}
     for table in TABLES:
-        rows[table] = _read_table(store.database, table)
+        rows[table] = _read_table(store.database, table, owner)
     rows['followups'] = store.followups()
     rows['rules'] = store.rules()
     return rows
@@ -171,7 +178,7 @@ def copy_cloud_to_local(owner, local_path=None, store=None):
         from cloud_store import PostgresStore
 
         store = PostgresStore(bootstrap=False, model_service=False).for_user(owner)
-    rows = read_cloud(store)
+    rows = read_cloud(store, owner)
     backup = _backup(path)
     local = Store(path, seed=False)
     counts = {}
