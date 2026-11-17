@@ -989,9 +989,9 @@ class Store:
                 raise ValueError(service['key_error'] + '；请重新填写后再开始采集')
             if not service['configured']:
                 raise ValueError('请先在模型服务设置中填写 API URL、模型名和 API Key')
-            from browser_agent import runtime_paths
+            from browser_agent import ensure_collect_runtime
 
-            runtime_paths()
+            ensure_collect_runtime()
         if not self.job_lock.acquire(blocking=False):
             raise ValueError('已有批次运行，请等待完成')
         rows = [

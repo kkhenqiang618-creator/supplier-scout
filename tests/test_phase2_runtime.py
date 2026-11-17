@@ -66,6 +66,49 @@ class Phase2Tests(unittest.TestCase):
         service._write(data)
         return service
 
+    def test_missing_moli_uses_the_chrome_fallback(self):
+        events = []
+        service = self.service()
+
+        def no_robots(url):
+            raise urllib.error.HTTPError(url, 404, 'nf', {}, None)
+
+        with (
+            patch('browser_agent.find_moli', return_value=None),
+            patch('browser_agent.validate_url'),
+            patch('engine.fetch', side_effect=no_robots),
+            patch.object(type(service), 'complete', side_effect=[FOUND]),
+        ):
+            result = run_site(
+                URL,
+                'contacts',
+                service,
+                [],
+                moli_factory=browser_agent.Browser,
+                chrome_factory=factory('Chrome', [GOOD], events),
+                chrome_ready=lambda: True,
+            )
+        self.assertEqual(result['contact_status'], 'found')
+        self.assertIn(('start', 'Chrome'), events)
+        self.assertNotIn(('start', 'Moli'), events)
+
+    def test_missing_moli_and_no_chrome_still_stops_the_batch(self):
+        service = self.service()
+        with (
+            patch('browser_agent.find_moli', return_value=None),
+            patch('browser_agent.chrome_enabled', return_value=True),
+        ):
+            with self.assertRaises(BrowserRuntimeError) as caught:
+                run_site(
+                    URL,
+                    'contacts',
+                    service,
+                    [],
+                    moli_factory=browser_agent.Browser,
+                    chrome_ready=lambda: False,
+                )
+        self.assertIn('浏览器运行环境未就绪', str(caught.exception))
+
     def test_robots_404_is_treated_as_no_rules(self):
         def fetch(url):
             raise urllib.error.HTTPError(url, 404, 'nf', {}, None)
@@ -146,7 +189,14 @@ class Phase2Tests(unittest.TestCase):
             ),
         ):
             with self.assertRaises(BrowserRuntimeError):
-                run_site(URL, 'contacts', service, [], moli_factory=browser_agent.Browser)
+                run_site(
+                    URL,
+                    'contacts',
+                    service,
+                    [],
+                    moli_factory=browser_agent.Browser,
+                    chrome_ready=lambda: False,
+                )
         self.assertEqual([e for e in events if e[0] == 'start'], [])
 
 
