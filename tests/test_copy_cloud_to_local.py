@@ -31,11 +31,16 @@ class FakeCursor:
 
 
 class FakeDatabase:
-    """Stands in for Postgres: row-level security is emulated with an owner filter."""
+    """Stands in for Postgres: row-level security is emulated with an owner filter.
 
-    def __init__(self, owner, tables):
+    `superuser=True` turns the policy off, the way the Supabase owner connection does, so
+    the explicit owner condition in the copy statement is what scopes the read (P30).
+    """
+
+    def __init__(self, owner, tables, superuser=False):
         self.owner = owner
         self.tables = tables
+        self.superuser = superuser
         self.statements = []
 
     def execute(self, statement, parameters=()):
@@ -43,11 +48,17 @@ class FakeDatabase:
         if not statement.lstrip().upper().startswith('SELECT'):
             raise AssertionError('云端只能读：' + statement)
         table = statement.split(' FROM ')[1].split()[0]
-        rows = [row for row in self.tables.get(table, []) if row.get('owner') == self.owner]
+        rows = list(self.tables.get(table, []))
+        if 'WHERE owner = %s AND id = ANY' in statement:
+            owner, chunk = parameters
+            wanted = set(chunk)
+            rows = [row for row in rows if row.get('owner') == owner and row['id'] in wanted]
+        elif 'WHERE owner = %s' in statement:
+            (owner,) = parameters
+            rows = [row for row in rows if row.get('owner') == owner]
+        if not self.superuser:
+            rows = [row for row in rows if row.get('owner') == self.owner]
         rows.sort(key=lambda row: row['id'])
-        if 'WHERE id = ANY' in statement:
-            wanted = set(parameters[0])
-            rows = [row for row in rows if row['id'] in wanted]
         return FakeCursor(rows)
 
     @contextlib.contextmanager
@@ -58,9 +69,9 @@ class FakeDatabase:
 
 
 class FakeCloudStore:
-    def __init__(self, owner, tables):
+    def __init__(self, owner, tables, superuser=False):
         self.username = owner
-        self.database = FakeDatabase(owner, tables)
+        self.database = FakeDatabase(owner, tables, superuser=superuser)
         self.followups_by_owner = {
             '小姜': {
                 '11': {'status': 'replied', 'note': '已回电', 'updated_at': '2026-11-16T10:00:00+00:00'},
@@ -185,6 +196,20 @@ class CopyCloudToLocalTests(unittest.TestCase):
             self.assertNotIn('model-service:user:别人', keys)
         self.assertFalse(any('settings' in statement for statement in self.store.database.statements))
 
+    def test_owner_is_filtered_explicitly_even_without_row_level_security(self):
+        # P30: the Supabase owner connection bypasses RLS, so the copy must name the owner.
+        store = FakeCloudStore('小姜', cloud_tables(), superuser=True)
+        counts, _ = copy_cloud_to_local('小姜', self.path, store=store)
+        self.assertEqual(counts['suppliers'], 2)
+        self.assertEqual(counts['events'], 1)
+        self.assertEqual(counts['history'], 1)
+        self.assertEqual(counts['drafts'], 1)
+        statements = store.database.statements
+        self.assertTrue(any('WHERE owner = %s' in item for item in statements))
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            urls = [row[0] for row in db.execute('SELECT url FROM suppliers ORDER BY id')]
+        self.assertEqual(urls, ['https://a.example', 'https://b.example'])
+
     def test_copied_workspace_reads_contacts_followups_and_rules(self):
         copy_cloud_to_local('小姜', self.path, store=self.store)
         store = Store(self.path, seed=False)
@@ -205,7 +230,7 @@ class CopyCloudToLocalTests(unittest.TestCase):
         store = FakeCloudStore('小姜', tables)
         counts, _ = copy_cloud_to_local('小姜', self.path, store=store)
         self.assertEqual(counts['suppliers'], 47)
-        queries = [s for s in store.database.statements if 'WHERE id = ANY' in s]
+        queries = [s for s in store.database.statements if 'id = ANY' in s]
         self.assertGreaterEqual(len(queries), 3)
 
     def test_refuses_when_local_workspace_has_real_suppliers(self):
