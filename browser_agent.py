@@ -323,22 +323,41 @@ def fetch_robots_once(url):
             raise ValueError('robots.txt 重定向次数过多')
 
 
-def runtime_paths():
+def find_moli():
+    """Path of the Moli browser agent, or None when this machine has none (P32)."""
     binary = os.environ.get('SCOUT_MOLI_BIN') or shutil.which('moli')
-    if not binary:
-        choices = list((ROOT.parents[1] / 'work' / 'browser-research' / 'moli').glob('*/moli')) + [
-            ROOT / 'runtime' / 'moli'
-        ]
-        binary = next((str(p) for p in choices if p.is_file()), None)
+    if binary:
+        return binary
+    choices = list((ROOT.parents[1] / 'work' / 'browser-research' / 'moli').glob('*/moli')) + [
+        ROOT / 'runtime' / 'moli'
+    ]
+    return next((str(p) for p in choices if p.is_file()), None)
+
+
+def find_playwright():
+    """Path of a Playwright module usable by the shared Node worker, or None."""
     module = os.environ.get('SCOUT_PLAYWRIGHT_MODULE')
-    if not module:
-        choices = [ROOT / 'node_modules' / 'playwright'] + list(
-            (Path.home() / '.npm' / '_npx').glob('*/node_modules/playwright')
-        )
-        module = next((str(p) for p in choices if (p / 'package.json').exists()), None)
+    if module:
+        return module
+    choices = [ROOT / 'node_modules' / 'playwright'] + list(
+        (Path.home() / '.npm' / '_npx').glob('*/node_modules/playwright')
+    )
+    return next((str(p) for p in choices if (p / 'package.json').exists()), None)
+
+
+def runtime_paths():
+    binary, module = find_moli(), find_playwright()
     if not binary or not module:
         raise BrowserRuntimeError('浏览器运行环境未就绪（后台缺少 Moli 或 Playwright），批次已停止')
     return binary, module
+
+
+def playwright_module():
+    """Playwright module alone: the Chrome fallback does not need Moli (P32)."""
+    module = find_playwright()
+    if not module:
+        raise BrowserRuntimeError('浏览器运行环境未就绪（后台缺少 Playwright），批次已停止')
+    return module
 
 
 # Test-only (tests/browser_regression.py): Moli 1.1.23 has no allowlist, so loopback fixtures run with every non-loopback private/reserved range blocked instead of --block-private-networks.
@@ -528,7 +547,7 @@ def chrome_available():
     try:
         if chrome_binary():
             return True
-        _, module = runtime_paths()
+        module = playwright_module()
         info = json.loads((Path(module).parent / 'playwright-core' / 'browsers.json').read_text())
         revision = next(b['revision'] for b in info['browsers'] if b['name'] == 'chromium-headless-shell')
     except Exception:
@@ -556,7 +575,7 @@ class ChromeBrowser(Browser):
     def __init__(self, folder, *, allow_loopback_for_tests=False):
         from egress_proxy import GuardProxy
 
-        _, module = runtime_paths()
+        module = playwright_module()
         chrome_binary()
         self.folder = Path(folder)
         self.stderr = (self.folder / 'chrome.log').open('w')
@@ -1987,6 +2006,23 @@ def _run_site(
     enabled = chrome_enabled()
     missing = enabled and not chrome_ready()
     enabled = enabled and not missing
+    if moli_factory is Browser and find_moli() is None:
+        # Local machines without the Moli agent still collect through the Chrome fallback (P32).
+        if not enabled:
+            raise BrowserRuntimeError('浏览器运行环境未就绪（后台缺少 Moli 或 Playwright），批次已停止')
+        log('本机没有 Moli，直接使用 Chrome 备用浏览器')
+        chrome = run_agent(
+            url,
+            scope,
+            service,
+            rules,
+            log,
+            browser_factory=chrome_factory,
+            deadline=site_end,
+            clock=clock,
+            extended_deadline=extended_end,
+        )
+        return strip_internal(chrome)
 
     def moli_run(escalate):
         result = run_agent(
