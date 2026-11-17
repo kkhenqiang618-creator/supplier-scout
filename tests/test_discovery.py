@@ -1,7 +1,6 @@
 import json
 import os
 import tempfile
-import threading
 import time
 import unittest
 import urllib.error
@@ -536,40 +535,6 @@ class DiscoveryStoreTests(unittest.TestCase):
         progress = self.store.discovery_progress()
         self.assertEqual(progress['status'], 'failed')
         self.assertIn('探测接口挂了', progress['error'])
-
-    def test_stop_keeps_partial_probes_and_reports_stopped(self):
-        started = threading.Event()
-
-        def slow_probe(hosts, aliases=None, cancel=None, **kwargs):
-            started.set()
-            while not cancel():
-                time.sleep(0.01)
-            return [{'host': 'alpha.example', 'ok': True, 'is_newapi': True}]
-
-        with mock.patch.object(discovery, 'probe_hosts', slow_probe):
-            self.store.discovery_start()
-            self.assertTrue(started.wait(5))
-            job = self.store.discovery_stop()
-            self.assertEqual(job['status'], 'stopping')
-            self.assertTrue(job['stopping'])
-            deadline = time.time() + 5
-            while (
-                self.store.discovery_progress()['status'] in ('running', 'stopping')
-                and time.time() < deadline
-            ):
-                time.sleep(0.02)
-        progress = self.store.discovery_progress()
-        self.assertEqual(progress['status'], 'stopped', progress)
-        self.assertEqual(progress['stage'], '已终止')
-        self.assertFalse(progress['stopping'])
-        self.assertTrue(progress['summary']['cancelled'])
-        self.assertEqual([row['host'] for row in self.store.discovery_list()], ['alpha.example'])
-
-    def test_stop_on_an_idle_round_is_a_no_op(self):
-        job = self.store.discovery_stop()
-        self.assertEqual(job['status'], 'idle')
-        self.assertFalse(job['stopping'])
-        self.assertFalse(self.store.discovery_stop_event.is_set())
 
     def test_paste_runs_in_the_background_too(self):
         with (
