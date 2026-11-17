@@ -759,7 +759,7 @@ def unwrap_api(payload):
     return data
 
 
-def fetch_public_api(url):
+def fetch_public_api(url, timeout=12):
     """One public GET through the collection egress; JSON/text responses only."""
     validate_url(url)
     from engine import SafeRedirect
@@ -773,7 +773,7 @@ def fetch_public_api(url):
         },
     )
     with collection_opener(SafeRedirect(), PeerHTTPHandler(), PeerHTTPSHandler()) as opener:
-        with opener.open(request, timeout=12) as response:
+        with opener.open(request, timeout=timeout) as response:
             raw = response.read(API_MAX_BYTES + 1)
             content_type = response.headers.get_content_type()
             charset = response.headers.get_content_charset() or 'utf-8'

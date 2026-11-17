@@ -25,14 +25,17 @@ from collection_diagnostics import collection_diagnostics
 from entry_recovery import validate_entry_url, canonical_url
 from importers import prepare_rows
 from model_service import ModelService
+from search_service import SearchService
 
-LOCAL_SCHEMA_VERSION = 2
+LOCAL_SCHEMA_VERSION = 4
 
 
 class Store:
     def __init__(self, path, seed=True):
         self.path = str(path)
         self.model_service = ModelService(Path(path).with_name('model-service.json'))
+        self.search_service = SearchService(Path(path).with_name('search-service.json'))
+        self.discovery_job = self._discovery_idle()
         self.lock = threading.RLock()
         self.job_lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -53,6 +56,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,supplier_id INTEGER,mode TEXT,message TEXT,created_at TEXT);
             CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY,supplier_id INTEGER,mode TEXT,offers TEXT,created_at TEXT);
             CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY,supplier_id INTEGER UNIQUE,subject TEXT,body TEXT,created_at TEXT);
+            CREATE TABLE IF NOT EXISTS discovery_candidates(id INTEGER PRIMARY KEY,host TEXT NOT NULL UNIQUE,source_url TEXT NOT NULL DEFAULT '',discovered_at TEXT NOT NULL,is_newapi INTEGER NOT NULL DEFAULT 0,k31 TEXT NOT NULL DEFAULT '[]',selfhost_label TEXT NOT NULL DEFAULT '',selfhost_sentence TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',probe TEXT NOT NULL DEFAULT '{}',found_by TEXT NOT NULL DEFAULT '',updated_at TEXT);
             ''')
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version > LOCAL_SCHEMA_VERSION:
@@ -69,6 +73,11 @@ class Store:
                 ]:
                     if column not in columns:
                         db.execute('ALTER TABLE suppliers ADD COLUMN ' + column + ' ' + definition)
+                candidates = {r[1] for r in db.execute('PRAGMA table_info(discovery_candidates)')}
+                if 'found_by' not in candidates:
+                    db.execute(
+                        "ALTER TABLE discovery_candidates ADD COLUMN found_by TEXT NOT NULL DEFAULT ''"
+                    )
                 db.execute('PRAGMA user_version=%d' % LOCAL_SCHEMA_VERSION)
             for row in db.execute(
                 "SELECT id,contacts FROM suppliers WHERE contact_status='not_started'"
@@ -367,6 +376,11 @@ class Store:
                     ],
                     'job': dict(self.job),
                     'model_service': self.model_service.public(),
+                    **(
+                        {'search_service': self.search_service.public()}
+                        if getattr(self, 'search_service', None) is not None
+                        else {}
+                    ),
                     'integrations': {
                         'email': False,
                         'feishu': False,
@@ -415,6 +429,275 @@ class Store:
             note += '，其中 ' + str(archived) + ' 条网址已归档，可在「已归档」中恢复'
         self.event(note)
         return {'added': added, 'duplicates': skipped, 'archived': archived}
+
+    @staticmethod
+    def _discovery_row(row):
+        def decode(value, fallback):
+            if not value:
+                return fallback
+            try:
+                return load_json(value, fallback)
+            except ValueError:
+                return fallback
+
+        probe = decode(row['probe'], {})
+        item = dict(probe) if isinstance(probe, dict) else {}
+        item.update(
+            id=row['id'],
+            host=row['host'],
+            source_url=row['source_url'],
+            discovered_at=row['discovered_at'],
+            is_newapi=bool(row['is_newapi']),
+            k31=decode(row['k31'], []),
+            selfhost_label=row['selfhost_label'] or '',
+            selfhost_sentence=row['selfhost_sentence'] or '',
+            status=row['status'],
+            found_by=row['found_by'] or '',
+            updated_at=row['updated_at'] or '',
+        )
+        item['host'] = row['host']
+        return item
+
+    def discovery_hosts(self):
+        with self.connect() as db:
+            return {row['host'] for row in db.execute('SELECT host FROM discovery_candidates')}
+
+    def supplier_hosts(self):
+        from discovery import canonical_host
+
+        with self.connect() as db:
+            return {
+                canonical_host(row['url'])
+                for row in db.execute('SELECT url FROM suppliers WHERE mode="real"')
+            }
+
+    def discovery_list(self):
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM discovery_candidates
+                ORDER BY (k31 IS NULL OR k31='[]'), discovered_at DESC, id DESC"""
+            ).fetchall()
+        return [self._discovery_row(row) for row in rows]
+
+    def _save_discovery(self, probes, source_url=None, found_by=''):
+        """Upsert probe results; an existing host keeps its state and first discovery date."""
+        saved = 0
+        with self.lock, self.connect(write=True) as db:
+            for probe in probes:
+                if not probe.get('host'):
+                    continue
+                row = db.execute(
+                    'SELECT id FROM discovery_candidates WHERE host=?', (probe['host'],)
+                ).fetchone()
+                origin = probe.get('source_url') or source_url
+                discovered_by = probe.get('found_by') or found_by
+                if row:
+                    db.execute(
+                        """UPDATE discovery_candidates SET source_url=COALESCE(?,source_url),
+                        is_newapi=?,k31=?,selfhost_label=?,selfhost_sentence=?,probe=?,
+                        found_by=CASE WHEN found_by='' THEN ? ELSE found_by END,updated_at=?
+                        WHERE id=?""",
+                        (
+                            origin,
+                            int(bool(probe.get('is_newapi'))),
+                            encode(probe.get('k31') or []),
+                            probe.get('selfhost_label') or '',
+                            probe.get('selfhost_sentence') or '',
+                            encode(probe),
+                            discovered_by,
+                            now(),
+                            row['id'],
+                        ),
+                    )
+                else:
+                    db.execute(
+                        """INSERT INTO discovery_candidates(host,source_url,discovered_at,
+                        is_newapi,k31,selfhost_label,selfhost_sentence,status,probe,found_by,updated_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            probe['host'],
+                            origin or '',
+                            now(),
+                            int(bool(probe.get('is_newapi'))),
+                            encode(probe.get('k31') or []),
+                            probe.get('selfhost_label') or '',
+                            probe.get('selfhost_sentence') or '',
+                            'new',
+                            encode(probe),
+                            discovered_by,
+                            now(),
+                        ),
+                    )
+                saved += 1
+        return saved
+
+    def discovery_suppliers(self):
+        """Saved supplier hosts with the source texts already stored for them."""
+        from discovery import canonical_host
+
+        with self.connect() as db:
+            rows = db.execute('SELECT url,sources FROM suppliers WHERE mode="real"').fetchall()
+        items = []
+        for row in rows:
+            host = canonical_host(row['url'])
+            if not host:
+                continue
+            try:
+                sources = load_json(row['sources'], [])
+            except ValueError:
+                sources = []
+            texts = [
+                str(item.get('excerpt') or '')
+                for item in sources
+                if isinstance(item, dict) and str(item.get('excerpt') or '').strip()
+            ]
+            items.append({'host': host, 'url': row['url'], 'sources': texts})
+        return items
+
+    @staticmethod
+    def _discovery_idle():
+        return {
+            'status': 'idle',
+            'stage': '',
+            'done': 0,
+            'total': 0,
+            'note': '',
+            'error': '',
+            'started_at': None,
+            'finished_at': None,
+            'summary': None,
+        }
+
+    def discovery_progress(self):
+        with self.lock:
+            return dict(self.discovery_job)
+
+    def _discovery_report(self, **changes):
+        with self.lock:
+            if isinstance(self.discovery_job, dict):
+                self.discovery_job.update(changes)
+            return dict(self.discovery_job)
+
+    def _discovery_worker(self, source, queries):
+        try:
+            summary = self.discovery_round(source, queries, progress=self._discovery_step)
+        except Exception as error:  # the page must show why a round died, not a stuck bar
+            self._discovery_report(
+                status='failed',
+                stage='失败',
+                error=str(error) or error.__class__.__name__,
+                finished_at=now(),
+            )
+            return
+        self._discovery_report(
+            status='done',
+            stage='完成',
+            done=self.discovery_job.get('total') or 0,
+            finished_at=now(),
+            summary=summary,
+        )
+
+    def _discovery_step(self, stage, done, total, note=''):
+        # A stage with nothing to do must not wipe the count of the previous one.
+        changes = {'stage': stage, 'done': done, 'note': note}
+        if total:
+            changes['total'] = total
+        self._discovery_report(**changes)
+
+    def discovery_start(self, source='', queries=None):
+        """Run one round in the background; the page polls the counter instead of waiting."""
+        with self.lock:
+            if self.discovery_job.get('status') == 'running':
+                raise ValueError('发现任务正在运行，请等这一轮结束')
+            self.discovery_job = dict(
+                self._discovery_idle(),
+                status='running',
+                stage='准备',
+                started_at=now(),
+            )
+        thread = threading.Thread(
+            target=self._discovery_worker,
+            args=(source, queries),
+            name='discovery-round',
+            daemon=True,
+        )
+        thread.start()
+        return {'started': True, 'progress': self.discovery_progress()}
+
+    def discovery_round(self, source='', queries=None, progress=None):
+        """Gather the saved inputs, run the a->c->b round, store the probes."""
+        import discovery
+
+        service = self.search_service.read()
+        keywords = [
+            str(query).strip()
+            for query in (queries if queries is not None else service.get('queries') or [])
+            if str(query).strip()
+        ]
+        result = discovery.run_round(
+            suppliers=self.discovery_suppliers(),
+            known_hosts=sorted(self.discovery_hosts()),
+            pasted=[source] if str(source or '').strip() else [],
+            queries=keywords,
+            api_key=service.get('api_key') or '',
+            key_error=service.get('key_error') or '',
+            exclude=service.get('exclude') or [],
+            aliases=discovery.rules_aliases(self.rules()),
+            progress=progress,
+        )
+        self._save_discovery(result['probes'])
+        summary = dict(result['summary'])
+        summary['candidates'] = self.discovery_list()
+        return summary
+
+    def discovery_recheck(self, ids=None):
+        """Re-probe hosts already in the list; state is never reset by a recheck."""
+        import discovery
+
+        aliases = discovery.rules_aliases(self.rules())
+        rows = self.discovery_list()
+        if ids:
+            wanted = {int(value) for value in ids}
+            rows = [row for row in rows if row['id'] in wanted]
+        self._save_discovery(discovery.probe_hosts([row['host'] for row in rows], aliases))
+        return {'checked': len(rows), 'candidates': self.discovery_list()}
+
+    def discovery_set_status(self, ids, status):
+        if status not in ('new', 'ignored'):
+            raise ValueError('发现状态无效')
+        wanted = [int(value) for value in ids]
+        if not wanted:
+            raise ValueError('请选择要处理的站点')
+        with self.lock, self.connect(write=True) as db:
+            db.execute(
+                'UPDATE discovery_candidates SET status=?,updated_at=? WHERE id IN ('
+                + ','.join('?' for _ in wanted)
+                + ')',
+                (status, now(), *wanted),
+            )
+        return {'ok': True, 'status': status, 'ids': wanted}
+
+    def discovery_enqueue(self, ids):
+        """Add the checked hosts to the supplier list through the normal import path."""
+        wanted = [int(value) for value in ids]
+        if not wanted:
+            raise ValueError('请选择要加入名单的站点')
+        rows = [row for row in self.discovery_list() if row['id'] in set(wanted)]
+        if not rows:
+            raise ValueError('找不到这些发现记录')
+        result = self.import_rows([{'url': 'https://' + row['host'] + '/'} for row in rows])
+        with self.lock, self.connect(write=True) as db:
+            db.execute(
+                'UPDATE discovery_candidates SET status=?,updated_at=? WHERE id IN ('
+                + ','.join('?' for _ in rows)
+                + ')',
+                ('enqueued', now(), *[row['id'] for row in rows]),
+            )
+        return {
+            'added': result['added'],
+            'duplicates': result['duplicates'],
+            'candidates': self.discovery_list(),
+        }
 
     def save_result(self, sid, result):
         with self.lock:
