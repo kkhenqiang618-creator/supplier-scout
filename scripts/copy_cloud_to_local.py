@@ -171,7 +171,6 @@ def copy_cloud_to_local(owner, local_path=None, store=None):
         from cloud_store import PostgresStore
 
         store = PostgresStore(bootstrap=False, model_service=False).for_user(owner)
-    print('正在读取云端数据（页面快照较大，可能需要几分钟）…', flush=True)
     rows = read_cloud(store)
     backup = _backup(path)
     local = Store(path, seed=False)
@@ -206,6 +205,7 @@ def main(argv=None):
         '--local', default=str(DEFAULT_LOCAL), help='本机 SQLite 路径（默认 data/supplier.db）'
     )
     args = parser.parse_args(argv)
+    print('正在读取云端数据（页面快照较大，可能需要几分钟）…', flush=True)
     counts, backup = copy_cloud_to_local(args.owner, args.local)
     if backup:
         print('已备份本机库：' + backup.name)
