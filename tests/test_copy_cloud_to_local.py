@@ -45,6 +45,9 @@ class FakeDatabase:
         table = statement.split(' FROM ')[1].split()[0]
         rows = [row for row in self.tables.get(table, []) if row.get('owner') == self.owner]
         rows.sort(key=lambda row: row['id'])
+        if 'WHERE id = ANY' in statement:
+            wanted = set(parameters[0])
+            rows = [row for row in rows if row['id'] in wanted]
         return FakeCursor(rows)
 
     @contextlib.contextmanager
@@ -189,6 +192,21 @@ class CopyCloudToLocalTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(next(iter(records.values()))['note'], '已回电')
         self.assertEqual(store.rules(), copy.deepcopy(DEFAULT_RULES))
+
+    def test_pages_through_tables_larger_than_one_batch(self):
+        tables = cloud_tables()
+        for index in range(45):
+            tables['suppliers'].append(
+                {'id': 100 + index, 'url': 'https://bulk%d.example' % index, 'name': '批量 %d' % index,
+                 'mode': 'real', 'status': 'pending', 'contacts': {}, 'offers': [], 'sources': [],
+                 'warnings': [], 'owner': '小姜',
+                 'created_at': '2026-11-16T09:00:00+00:00', 'checked_at': None}
+            )
+        store = FakeCloudStore('小姜', tables)
+        counts, _ = copy_cloud_to_local('小姜', self.path, store=store)
+        self.assertEqual(counts['suppliers'], 47)
+        queries = [s for s in store.database.statements if 'WHERE id = ANY' in s]
+        self.assertGreaterEqual(len(queries), 3)
 
     def test_refuses_when_local_workspace_has_real_suppliers(self):
         store = Store(self.path)
