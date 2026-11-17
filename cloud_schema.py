@@ -178,9 +178,10 @@ def _apply(database, pending):
                 if isinstance(error, psycopg.errors.InsufficientPrivilege):
                     print(
                         '[schema] %s not applied: the app role may not change the schema.'
-                        ' Run migrations/postgres/%s.sql as the database owner, or grant it:'
-                        ' GRANT CREATE ON SCHEMA %s TO scout_app'
-                        % (migration.version, migration.version, SCHEMA),
+                        ' Run migrations/postgres/%s.sql as the database owner in the Supabase'
+                        ' SQL editor; granting CREATE is not enough, because Postgres only lets'
+                        ' the table owner alter a table.'
+                        % (migration.version, migration.version),
                         flush=True,
                     )
                     continue
