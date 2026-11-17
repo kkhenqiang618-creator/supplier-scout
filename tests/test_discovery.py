@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -110,6 +111,16 @@ def site_pages(alpha_home=HOMEPAGE):
 
 
 class DiscoveryUnitTests(unittest.TestCase):
+    def test_aliases_come_from_the_saved_rule(self):
+        rules = [{'model': 'kimi-k3.1', 'aliases': ['Kimi K3.1', 'K31X']}]
+        self.assertEqual(discovery.rules_aliases(rules), ('Kimi K3.1', 'K31X'))
+        self.assertTrue(discovery.matches_k31('[Beta]K31X', ('Kimi K3.1', 'K31X')))
+        self.assertFalse(discovery.matches_k31('kimi-k3.1-pro', ('K31X',)))
+
+    def test_aliases_fall_back_to_the_built_in_list(self):
+        self.assertEqual(discovery.rules_aliases([]), discovery.K31_ALIASES)
+        self.assertIn('kimi-k3.1-pro', discovery.rules_aliases([{'model': 'glm-5.3'}]))
+
     def test_normalize_source_accepts_domain_and_url(self):
         with mock.patch.object(discovery, 'validate_url', lambda url: url):
             self.assertEqual(discovery.normalize_source('example.com'), 'https://example.com/')
@@ -152,8 +163,9 @@ class DiscoveryUnitTests(unittest.TestCase):
 
     def test_probe_alpha_records_everything_verbatim(self):
         site = FakeSite(site_pages())
-        with mock.patch.object(discovery, 'fetch_text', site.fetch), mock.patch.object(
-            discovery, 'validate_url', lambda url: url
+        with (
+            mock.patch.object(discovery, 'fetch_text', site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
             result = discovery.probe_host('alpha.example')
         self.assertTrue(result['ok'], result['error'])
@@ -181,8 +193,9 @@ class DiscoveryUnitTests(unittest.TestCase):
 
     def test_probe_without_matching_model(self):
         site = FakeSite(site_pages())
-        with mock.patch.object(discovery, 'fetch_text', site.fetch), mock.patch.object(
-            discovery, 'validate_url', lambda url: url
+        with (
+            mock.patch.object(discovery, 'fetch_text', site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
             result = discovery.probe_host('beta.example')
         self.assertTrue(result['ok'], result['error'])
@@ -191,8 +204,9 @@ class DiscoveryUnitTests(unittest.TestCase):
 
     def test_probe_plain_site_is_not_newapi(self):
         site = FakeSite(site_pages())
-        with mock.patch.object(discovery, 'fetch_text', site.fetch), mock.patch.object(
-            discovery, 'validate_url', lambda url: url
+        with (
+            mock.patch.object(discovery, 'fetch_text', site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
             result = discovery.probe_host('gamma.example')
         self.assertTrue(result['ok'], result['error'])
@@ -201,8 +215,9 @@ class DiscoveryUnitTests(unittest.TestCase):
 
     def test_probe_respects_robots_and_skips_private_requests(self):
         site = FakeSite(site_pages())
-        with mock.patch.object(discovery, 'fetch_text', site.fetch), mock.patch.object(
-            discovery, 'validate_url', lambda url: url
+        with (
+            mock.patch.object(discovery, 'fetch_text', site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
             result = discovery.probe_host('epsilon.example')
         self.assertFalse(result['ok'])
@@ -214,8 +229,9 @@ class DiscoveryUnitTests(unittest.TestCase):
     def test_robots_server_error_is_reported_not_ignored(self):
         pages = site_pages()
         site = FakeSite(pages, {'https://epsilon.example/robots.txt': 503})
-        with mock.patch.object(discovery, 'fetch_text', site.fetch), mock.patch.object(
-            discovery, 'validate_url', lambda url: url
+        with (
+            mock.patch.object(discovery, 'fetch_text', site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
             result = discovery.probe_host('epsilon.example')
         self.assertIn('robots.txt 无法确认允许访问', result['error'])
@@ -267,12 +283,15 @@ class DiscoverySearchTests(unittest.TestCase):
 
     def test_snowball_follows_one_level_and_skips_excluded(self):
         site = FakeSite(site_pages())
-        with mock.patch.object(discovery, 'fetch_text', site.fetch), mock.patch.object(
-            discovery, 'validate_url', lambda url: url
+        with (
+            mock.patch.object(discovery, 'fetch_text', site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
             result = discovery.snowball_hosts(['https://directory.example/'], exclude=['beta.example'])
         self.assertEqual(result['pages'], 1)
-        self.assertEqual([host['host'] for host in result['hosts']], ['alpha.example', 'gamma.example', 'epsilon.example'])
+        self.assertEqual(
+            [host['host'] for host in result['hosts']], ['alpha.example', 'gamma.example', 'epsilon.example']
+        )
         self.assertTrue(result['hosts'][0]['found_by'].startswith('滚雪球：'))
 
 
@@ -287,8 +306,9 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def discover(self, source='directory.example'):
-        with mock.patch.object(discovery, 'fetch_text', self.site.fetch), mock.patch.object(
-            discovery, 'validate_url', lambda url: url
+        with (
+            mock.patch.object(discovery, 'fetch_text', self.site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
             return self.store.discovery_discover(source)
 
@@ -298,9 +318,7 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.assertEqual(result['new_hosts'], 4)
         hosts = [row['host'] for row in result['candidates']]
         self.assertEqual(hosts[0], 'alpha.example')
-        self.assertEqual(
-            sorted(hosts), ['alpha.example', 'beta.example', 'epsilon.example', 'gamma.example']
-        )
+        self.assertEqual(sorted(hosts), ['alpha.example', 'beta.example', 'epsilon.example', 'gamma.example'])
         self.assertEqual(self.store.discovery_list()[0]['k31'][0]['model_name'], '[Alpha]kimi-k3.1-pro')
 
     def test_known_supplier_hosts_are_not_added(self):
@@ -350,8 +368,9 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.discover()
         alpha = next(row for row in self.store.discovery_list() if row['host'] == 'alpha.example')
         self.store.discovery_set_status([alpha['id']], 'ignored')
-        with mock.patch.object(discovery, 'fetch_text', self.site.fetch), mock.patch.object(
-            discovery, 'validate_url', lambda url: url
+        with (
+            mock.patch.object(discovery, 'fetch_text', self.site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
             result = self.store.discovery_recheck([alpha['id']])
         self.assertEqual(result['checked'], 1)
@@ -372,11 +391,13 @@ class DiscoveryStoreTests(unittest.TestCase):
                 {'url': 'https://zhihu.com/question/1', 'content': '知乎讨论'},
             ]
         }
-        with mock.patch.object(discovery, 'fetch_text', self.site.fetch), mock.patch.object(
-            discovery, 'validate_url', lambda url: url
-        ), mock.patch.object(
-            discovery, 'search_request', mock.Mock(side_effect=lambda query, key, count=50: payload)
-        ) as fake:
+        with (
+            mock.patch.object(discovery, 'fetch_text', self.site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
+            mock.patch.object(
+                discovery, 'search_request', mock.Mock(side_effect=lambda query, key, count=50: payload)
+            ) as fake,
+        ):
             result = self.store.discovery_run()
         self.assertEqual(fake.call_count, 1)
         self.assertEqual(result['search_calls'], 1)
@@ -388,13 +409,121 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.assertTrue(row['found_by'].startswith('搜索：'))
 
     def test_run_without_search_key_skips_search(self):
-        with mock.patch.object(discovery, 'fetch_text', self.site.fetch), mock.patch.object(
-            discovery, 'validate_url', lambda url: url
+        with (
+            mock.patch.object(discovery, 'fetch_text', self.site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
             result = self.store.discovery_run()
         self.assertEqual(result['search_calls'], 0)
         self.assertIn('未接入 DeepSeek 搜索 Key', result['skipped'][0])
         self.assertEqual(result['candidates'], [])
+
+    def test_round_uses_the_aliases_of_the_saved_rule(self):
+        self.store._save_discovery([{'host': 'alpha.example'}])
+        seen = []
+
+        def fake_probe(hosts, aliases=None, max_parallel=4, progress=None):
+            seen.append(list(aliases))
+            return []
+
+        empty = {'calls': 0, 'hosts': [], 'errors': []}
+        with (
+            mock.patch.object(
+                self.store, 'rules', return_value=[{'model': 'kimi-k3.1', 'aliases': ['Kimi K3.1', 'K31X']}]
+            ),
+            mock.patch.object(discovery, 'probe_hosts', fake_probe),
+            mock.patch.object(discovery, 'search_round', lambda *a, **k: empty),
+            mock.patch.object(
+                discovery, 'snowball_hosts', lambda *a, **k: {'pages': 0, 'hosts': [], 'errors': []}
+            ),
+        ):
+            self.store.discovery_run()
+        self.assertEqual(seen[0], ['Kimi K3.1', 'K31X'])
+
+    def test_start_runs_in_the_background_and_reports_progress(self):
+        self.store._save_discovery([{'host': 'alpha.example'}, {'host': 'beta.example'}])
+
+        def fake_probe(hosts, aliases=None, max_parallel=4, progress=None):
+            for index, host in enumerate(hosts, 1):
+                time.sleep(0.03)
+                if progress:
+                    progress(index, len(hosts), '探测：' + host)
+            return [{'host': host, 'ok': True} for host in hosts]
+
+        empty = {'calls': 0, 'hosts': [], 'errors': []}
+        with (
+            mock.patch.object(discovery, 'probe_hosts', fake_probe),
+            mock.patch.object(discovery, 'search_round', lambda *a, **k: empty),
+            mock.patch.object(
+                discovery, 'snowball_hosts', lambda *a, **k: {'pages': 0, 'hosts': [], 'errors': []}
+            ),
+        ):
+            started = self.store.discovery_start()
+            self.assertTrue(started['started'])
+            self.assertEqual(self.store.discovery_progress()['status'], 'running')
+            with self.assertRaises(ValueError):
+                self.store.discovery_start()
+            deadline = time.time() + 5
+            while self.store.discovery_progress()['status'] == 'running' and time.time() < deadline:
+                time.sleep(0.02)
+        progress = self.store.discovery_progress()
+        self.assertEqual(progress['status'], 'done')
+        self.assertEqual(progress['stage'], '完成')
+        self.assertTrue(progress['summary'])
+        self.assertGreaterEqual(progress['total'], 1)
+
+    def test_background_failure_is_reported_instead_of_sticking(self):
+        def boom(*args, **kwargs):
+            raise RuntimeError('探测接口挂了')
+
+        empty = {'calls': 0, 'hosts': [], 'errors': []}
+        with (
+            mock.patch.object(discovery, 'probe_hosts', boom),
+            mock.patch.object(discovery, 'search_round', lambda *a, **k: empty),
+            mock.patch.object(
+                discovery, 'snowball_hosts', lambda *a, **k: {'pages': 0, 'hosts': [], 'errors': []}
+            ),
+        ):
+            self.store.discovery_start()
+            deadline = time.time() + 5
+            while self.store.discovery_progress()['status'] == 'running' and time.time() < deadline:
+                time.sleep(0.02)
+        progress = self.store.discovery_progress()
+        self.assertEqual(progress['status'], 'failed')
+        self.assertIn('探测接口挂了', progress['error'])
+
+    def test_paste_runs_in_the_background_too(self):
+        site = FakeSite(site_pages())
+        with (
+            mock.patch.object(discovery, 'fetch_text', site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
+        ):
+            started = self.store.discovery_start(['directory.example'], None, True)
+            self.assertTrue(started['started'])
+            deadline = time.time() + 5
+            while self.store.discovery_progress()['status'] == 'running' and time.time() < deadline:
+                time.sleep(0.02)
+        progress = self.store.discovery_progress()
+        self.assertEqual(progress['status'], 'done', progress)
+        rows = self.store.discovery_list()
+        self.assertIn('alpha.example', {row['host'] for row in rows})
+        self.assertTrue(all(row['found_by'].startswith('粘贴：') for row in rows))
+
+    def test_paste_reports_a_dead_source_as_failed(self):
+        with mock.patch.object(
+            discovery, 'discover', side_effect=ValueError('robots.txt 不允许访问该来源页')
+        ):
+            self.store.discovery_start(['directory.example'], None, True)
+            deadline = time.time() + 5
+            while self.store.discovery_progress()['status'] == 'running' and time.time() < deadline:
+                time.sleep(0.02)
+        progress = self.store.discovery_progress()
+        self.assertEqual(progress['status'], 'failed')
+        self.assertIn('robots.txt', progress['error'])
+
+    def test_paste_without_a_source_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.store.discovery_start(['  '], None, True)
 
     def test_discover_records_the_pasted_source(self):
         self.discover()

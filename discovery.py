@@ -33,7 +33,9 @@ API_PRICING = '/api/pricing'
 # Model families we look for: "kimi-k3.1-pro" and its variants, optionally with a
 # seller prefix such as "[某某]kimi-k3.1-pro". "pro" and "pro-highspeed" stay
 # separate entries because they are priced differently.
-K31_ALIAS = re.compile(r'^kimi[-_ ]?k3\.1[-_ ]?pro(?![a-z])', re.I)
+# Alias matching follows the saved kimi-k3.1 rule (see rules_aliases); this list is only
+# the fallback when the rule carries no aliases.
+K31_ALIASES = ('Kimi K3.1', 'K3.1', 'kimi-k3.1', 'kimi-k3.1-pro', 'kimi-k3.1-pro-highspeed')
 K31_PREFIX = re.compile(r'^\[[^\]]{1,40}\]\s*')
 
 # Homepage wording that hints at self-hosted / bare-metal capacity. It is only a
@@ -158,9 +160,65 @@ def selfhost_hits(text):
     return '', ''
 
 
-def matches_k31(model_name):
-    name = K31_PREFIX.sub('', str(model_name or '').strip())
-    return bool(K31_ALIAS.match(name))
+def _norm_model(value):
+    text = K31_PREFIX.sub('', str(value or '').strip()).lower()
+    return re.sub(r'[\s_]+', '-', text)
+
+
+def rules_aliases(rules):
+    """The kimi-k3.1 aliases from the saved rules; the built-in list is the fallback."""
+    for rule in rules or []:
+        if not isinstance(rule, dict):
+            continue
+        if str(rule.get('model') or '').strip().lower() != 'kimi-k3.1':
+            continue
+        aliases = [str(alias).strip() for alias in rule.get('aliases') or [] if str(alias).strip()]
+        if aliases:
+            return tuple(aliases)
+        break
+    return K31_ALIASES
+
+
+def _alias_extensions(normalized):
+    """Variants that may trail an alias: "pro" from "kimi-k3.1-pro", and so on."""
+    extensions = set()
+    for short in normalized:
+        for longer in normalized:
+            if longer.startswith(short + '-'):
+                extensions.add(longer[len(short) + 1 :])
+    return extensions
+
+
+def matches_k31(model_name, aliases=K31_ALIASES):
+    """True when the name is one of the rule's aliases, or that alias plus a known variant."""
+    normalized = sorted(
+        {_norm_model(alias) for alias in aliases or () if _norm_model(alias)}, key=len, reverse=True
+    )
+    if not normalized:
+        return False
+    extensions = _alias_extensions(normalized)
+    text = _norm_model(model_name)
+    for needle in normalized:
+        start = 0
+        while True:
+            index = text.find(needle, start)
+            if index < 0:
+                break
+            before = text[index - 1] if index else ''
+            rest = text[index + len(needle) :]
+            if not before.isalnum() and _alias_ends(rest, extensions):
+                return True
+            start = index + 1
+    return False
+
+
+def _alias_ends(rest, extensions):
+    if not rest:
+        return True
+    if not rest.startswith('-'):
+        return False
+    tail = rest[1:]
+    return any(tail == variant or tail.startswith(variant + '-') for variant in extensions)
 
 
 def _number(value):
@@ -189,11 +247,11 @@ def unit_prices(entry):
     }
 
 
-def k31_entries(pricing):
+def k31_entries(pricing, aliases=K31_ALIASES):
     """Keep only K3.1 Pro model rows, verbatim fields plus the derived unit prices."""
     entries = []
     for entry in pricing if isinstance(pricing, list) else []:
-        if not isinstance(entry, dict) or not matches_k31(entry.get('model_name')):
+        if not isinstance(entry, dict) or not matches_k31(entry.get('model_name'), aliases):
             continue
         saved = {
             key: entry.get(key)
@@ -324,19 +382,20 @@ def search_request(query, api_key, count=SEARCH_COUNT):
     except urllib.error.HTTPError as error:
         if error.code == 401:
             # The service echoes a masked key; do not show any of it.
-            raise ValueError('DeepSeek 搜索失败（HTTP 401）：请到「能力接入」核对 DeepSeek 搜索 Key') from None
-        raise ValueError(
-            'DeepSeek 搜索失败（HTTP %d）：%s' % (error.code, _http_detail(error))
-        ) from None
+            raise ValueError(
+                'DeepSeek 搜索失败（HTTP 401）：请到「能力接入」核对 DeepSeek 搜索 Key'
+            ) from None
+        raise ValueError('DeepSeek 搜索失败（HTTP %d）：%s' % (error.code, _http_detail(error))) from None
     except (urllib.error.URLError, OSError) as error:
         reason = getattr(error, 'reason', error)
         raise ValueError('DeepSeek 搜索失败：' + (str(reason)[:150] or '网络错误')) from None
 
 
-def search_round(queries, api_key, count=SEARCH_COUNT, max_calls=SEARCH_MAX_CALLS, exclude=()):
+def search_round(queries, api_key, count=SEARCH_COUNT, max_calls=SEARCH_MAX_CALLS, exclude=(), progress=None):
     """Run the keyword table (at most 20 searches) and collect hosts with their source."""
     found, seen, errors = [], set(), []
     calls = 0
+    total = min(len(queries or []), max_calls)
     for query in queries or []:
         if calls >= max_calls:
             break
@@ -349,6 +408,8 @@ def search_round(queries, api_key, count=SEARCH_COUNT, max_calls=SEARCH_MAX_CALL
         except ValueError as error:
             errors.append(str(error))
             continue
+        if progress:
+            progress(calls - 1, total, SEARCH_LABEL + text[:60])
         results = payload.get('results') if isinstance(payload, dict) else None
         label = SEARCH_LABEL + text[:60]
         for item in results if isinstance(results, list) else []:
@@ -364,10 +425,12 @@ def search_round(queries, api_key, count=SEARCH_COUNT, max_calls=SEARCH_MAX_CALL
                     break
                 seen.add(host)
                 found.append({'host': host, 'found_by': label, 'source_url': page})
+    if progress:
+        progress(calls, total, '')
     return {'calls': calls, 'hosts': found, 'errors': errors}
 
 
-def snowball_hosts(pages, exclude=(), max_pages=SNOWBALL_MAX_PAGES):
+def snowball_hosts(pages, exclude=(), max_pages=SNOWBALL_MAX_PAGES, progress=None):
     """Fetch up to 12 saved source pages once and collect their outbound hosts."""
     unique = []
     for page in pages or []:
@@ -386,6 +449,7 @@ def snowball_hosts(pages, exclude=(), max_pages=SNOWBALL_MAX_PAGES):
     hosts, seen, errors, done = [], set(), [], 0
     if not unique:
         return {'pages': 0, 'hosts': hosts, 'errors': errors}
+    total = len(unique)
     workers = max(1, min(MAX_PARALLEL, len(unique)))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         for page, result in zip(unique, executor.map(one, unique)):
@@ -393,6 +457,8 @@ def snowball_hosts(pages, exclude=(), max_pages=SNOWBALL_MAX_PAGES):
                 errors.append(page + '：' + result['error'])
                 continue
             done += 1
+            if progress:
+                progress(done, total, '滚动：' + page[:80])
             for host in result.get('hosts') or []:
                 if host in seen or is_excluded(host, exclude):
                     continue
@@ -403,7 +469,7 @@ def snowball_hosts(pages, exclude=(), max_pages=SNOWBALL_MAX_PAGES):
     return {'pages': done, 'hosts': hosts, 'errors': errors}
 
 
-def probe_host(host):
+def probe_host(host, aliases=K31_ALIASES):
     """One read-only probe of a candidate host; never raises."""
     origin = 'https://' + host
     result = {
@@ -456,13 +522,11 @@ def probe_host(host):
         except (urllib.error.HTTPError, ValueError, json.JSONDecodeError):
             pricing = None
         if pricing is not None:
-            result['group_ratio'] = (
-                pricing.get('group_ratio') if isinstance(pricing, dict) else None
-            )
+            result['group_ratio'] = pricing.get('group_ratio') if isinstance(pricing, dict) else None
             from browser_agent import unwrap_api
 
             entries = unwrap_api(pricing)
-            result['k31'] = k31_entries(entries if isinstance(entries, list) else [])
+            result['k31'] = k31_entries(entries if isinstance(entries, list) else [], aliases)
         result.update(ok=True, probed_at=_now())
     except Exception as error:  # one bad host must not abort a 200-host round
         result['error'] = str(error) or error.__class__.__name__
@@ -484,7 +548,7 @@ def _now():
     return now()
 
 
-def probe_hosts(hosts, max_parallel=MAX_PARALLEL):
+def probe_hosts(hosts, aliases=K31_ALIASES, max_parallel=MAX_PARALLEL, progress=None):
     """Probe up to 200 hosts with at most four concurrent GET-only workers."""
     unique = []
     seen = set()
@@ -497,5 +561,11 @@ def probe_hosts(hosts, max_parallel=MAX_PARALLEL):
     if not unique:
         return []
     workers = max(1, min(MAX_PARALLEL, int(max_parallel or MAX_PARALLEL), len(unique)))
+    results, done = [], 0
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        return list(executor.map(probe_host, unique))
+        for result in executor.map(lambda host: probe_host(host, aliases), unique):
+            results.append(result)
+            done += 1
+            if progress:
+                progress(done, len(unique), '探测：' + unique[done - 1])
+    return results

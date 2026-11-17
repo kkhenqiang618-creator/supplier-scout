@@ -61,7 +61,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/discovery':
                 if not self.LOCAL_ONLY:
                     return self.send({'error': '路径不存在'}, 404)
-                return self.send({'candidates': store.discovery_list()})
+                return self.send(
+                    {
+                        'candidates': store.discovery_list(),
+                        'progress': store.discovery_progress(),
+                    }
+                )
             if path == '/api/supplier':
                 try:
                     return self.send(store.get(int(params.get('id', ['0'])[0])))
@@ -325,9 +330,9 @@ class Handler(BaseHTTPRequestHandler):
                 options = {'recipient': data['recipient']} if 'recipient' in data else {}
                 result = store.save_draft(int(data['id']), data.get('subject'), data.get('body'), **options)
             elif path == '/api/discovery':
-                result = store.discovery_discover(data.get('source', ''))
+                result = store.discovery_start([data.get('source', '')], None, True)
             elif path == '/api/discovery/run':
-                result = store.discovery_run(data.get('sources'), data.get('queries'))
+                result = store.discovery_start(data.get('sources'), data.get('queries'))
             elif path == '/api/discovery/recheck':
                 result = store.discovery_recheck(data.get('ids'))
             elif path == '/api/discovery/ignore':
