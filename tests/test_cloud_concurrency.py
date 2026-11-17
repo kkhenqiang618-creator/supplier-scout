@@ -110,6 +110,8 @@ class CloudConcurrencyTests(unittest.TestCase):
         owners = []
 
         class FakeStore:
+            database = None
+
             def claim_job(self, owner):
                 owners.append(owner)
                 return {'id': 'job', 'owner': 'member'}
@@ -126,6 +128,7 @@ class CloudConcurrencyTests(unittest.TestCase):
 
         with (
             patch.object(cloud_worker, 'PostgresStore', return_value=FakeStore()),
+            patch.object(cloud_worker.cloud_schema, 'ensure'),
             patch.object(cloud_worker, 'execute_job', side_effect=execute),
             patch.object(cloud_worker.signal, 'signal'),
         ):
