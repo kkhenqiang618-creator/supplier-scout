@@ -5,6 +5,7 @@ import threading
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
 from auth import AuthManager, AuthHandlerMixin
+import cloud_schema
 from cloud_store import Database, PostgresStore, PostgresSessionStore, PostgresLoginLimiter
 from web_app import Handler
 
@@ -17,6 +18,7 @@ def context():
     with _LOCK:
         if _CONTEXT is None:
             database = Database()
+            cloud_schema.ensure(database)
             store = PostgresStore(database)
             auth = AuthManager.from_env(
                 required=True,

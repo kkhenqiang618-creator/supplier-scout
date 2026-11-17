@@ -10,6 +10,7 @@ import uuid
 from psycopg.types.json import Jsonb
 from urllib.parse import urlsplit
 from cloud_store import PostgresStore, LostLease
+import cloud_schema
 from model_service import ModelService, ModelConfigError, ModelTransientError, PHASE_TEXT, NETWORK_PHASES
 from collection import (
     collect_site,
@@ -485,6 +486,7 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: shutdown.set())
     signal.signal(signal.SIGINT, lambda *_: shutdown.set())
     store = PostgresStore()
+    cloud_schema.ensure(store.database)
     STATUS.update(
         started_at=time.time(),
         state='idle',
