@@ -190,6 +190,9 @@ class DiscoveryUnitTests(unittest.TestCase):
         self.assertEqual(second['unit_price']['input_price'], 3.0)
         self.assertEqual(second['unit_price']['output_price'], 6.0)
         self.assertEqual(result['status_raw']['data']['system_name'], 'Alpha API')
+        # P31: the status payload is stored once; footer/about text is read from it.
+        self.assertNotIn('footer_text', result)
+        self.assertNotIn('about_text', result)
 
     def test_probe_without_matching_model(self):
         site = FakeSite(site_pages())
@@ -549,17 +552,45 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.assertIn('alpha.example', {row['host'] for row in rows})
         self.assertTrue(all(row['found_by'].startswith('粘贴：') for row in rows))
 
-    def test_paste_reports_a_dead_source_as_failed(self):
-        with mock.patch.object(
-            discovery, 'discover', side_effect=ValueError('robots.txt 不允许访问该来源页')
+    def test_dead_paste_keeps_earlier_results_and_reports_the_error(self):
+        self.store.import_rows([{'url': 'https://alpha.example/'}])
+        with (
+            mock.patch.object(discovery, 'fetch_text', self.site.fetch),
+            mock.patch.object(discovery, 'validate_url', lambda url: url),
+            mock.patch.object(discovery, 'discover', side_effect=ValueError('robots.txt 不允许访问该来源页')),
         ):
             self.store.discovery_start('directory.example')
             deadline = time.time() + 5
             while self.store.discovery_progress()['status'] == 'running' and time.time() < deadline:
                 time.sleep(0.02)
         progress = self.store.discovery_progress()
-        self.assertEqual(progress['status'], 'failed')
-        self.assertIn('robots.txt', progress['error'])
+        self.assertEqual(progress['status'], 'done', progress)
+        errors = progress['summary']['errors']
+        self.assertTrue(any('robots.txt' in item for item in errors), errors)
+        rows = {row['host']: row for row in self.store.discovery_list()}
+        self.assertIn('alpha.example', rows)
+        self.assertEqual(rows['alpha.example']['found_by'], '已有名单')
+
+    def test_snowball_mines_the_saved_status_payload(self):
+        pages = site_pages()
+        pages['https://alpha.example/api/status'] = json.dumps(
+            {
+                'success': True,
+                'data': {
+                    'system_name': 'Alpha API',
+                    'footer_html': '友链 <a href="https://theta.example/">theta</a>',
+                    'announcements': '欢迎',
+                },
+            }
+        )
+        for name in ('robots.txt', '', 'api/status'):
+            pages['https://theta.example/' + name] = pages['https://delta.example/' + name]
+        self.site = FakeSite(pages)
+        self.store.import_rows([{'url': 'https://alpha.example/'}])
+        summary = self.run_round()
+        rows = {row['host']: row for row in summary['candidates']}
+        self.assertIn('theta.example', rows)
+        self.assertEqual(rows['theta.example']['found_by'], '滚雪球：alpha.example/api/status')
 
     def test_state_has_no_discovery_progress_and_keeps_search(self):
         state = self.store.state(full=False)

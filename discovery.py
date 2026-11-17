@@ -253,7 +253,8 @@ def k31_entries(pricing, aliases=K31_ALIASES):
 
 
 def status_details(payload):
-    """Small readable summary of a new-api /api/status answer (raw kept separately)."""
+    """Readable summary of a /api/status answer; the raw payload is kept separately."""
+
     from browser_agent import api_text, unwrap_api
 
     inner = unwrap_api(payload)
@@ -263,9 +264,6 @@ def status_details(payload):
         'price': data.get('price'),
         'quota_per_unit': data.get('quota_per_unit'),
         'announcement': api_text(data),
-        # Saved so the round can mine outbound links from the status page text (P25 b).
-        'footer_text': str(data.get('footer_html') or '')[:20000],
-        'about_text': str(data.get('about') or '')[:20000],
     }
     return details
 
@@ -442,15 +440,24 @@ def snowball_hosts(texts, exclude=(), progress=None):
 
 
 def _status_texts(probes):
-    """Text from /api/status footer/about/announcements for the snowball step."""
+    """Text mined from the saved /api/status payload for the snowball step.
+
+    Only ``status_raw`` is stored on a probe (P31), so the footer, about and
+    announcement text is read back from it instead of being copied.
+    """
+    from browser_agent import api_text, unwrap_api
+
     items = []
     for probe in probes:
-        if not probe.get('status_raw'):
+        raw = probe.get('status_raw')
+        if not raw:
             continue
+        inner = unwrap_api(raw)
+        data = inner if isinstance(inner, dict) else {}
         parts = [
-            probe.get('footer_text') or '',
-            probe.get('about_text') or '',
-            probe.get('announcement') or '',
+            str(data.get('footer_html') or ''),
+            str(data.get('about') or ''),
+            api_text(data),
         ]
         text = '\n'.join(part for part in parts if part)
         if text.strip():
@@ -552,7 +559,6 @@ def run_round(
     # hand-pasted pages are the user's own input; fetch each once
     pasted_hosts = []
     pasted_urls = [str(value).strip() for value in pasted or [] if str(value).strip()]
-    paste_ok = 0
     paste_errors = []
     for index, source in enumerate(pasted_urls):
         step('粘贴来源页', index, len(pasted_urls), source[:80])
@@ -561,14 +567,14 @@ def run_round(
         except (ValueError, OSError) as error:
             paste_errors.append(str(error)[:200] or error.__class__.__name__)
             continue
-        paste_ok += 1
         for host in page['hosts']:
             pasted_hosts.append(
                 {'host': host, 'found_by': '粘贴：' + source[:120], 'source_url': page['source_url']}
             )
-    if pasted_urls and not paste_ok:
-        raise ValueError(paste_errors[0] if paste_errors else '来源页打不开，没有可探测的主机')
-    errors.extend(paste_errors)
+    # A dead pasted page is reported, but it must not throw away the probes and
+    # searches that already succeeded in this round (P31).
+    for message in paste_errors:
+        errors.append('粘贴来源页：' + (message or '打不开'))
 
     # merge the new hosts, drop suppliers and hosts that were already probed
     targets, seen, origins = [], set(), {}
