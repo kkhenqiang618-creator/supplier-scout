@@ -111,16 +111,58 @@ def cloud_tables():
             ),
         ],
         'events': [
-            {'id': 1, 'supplier_id': 11, 'mode': 'real', 'message': '采集完成', 'created_at': '2026-11-16T09:00:00+00:00', 'owner': '小姜'},
-            {'id': 2, 'supplier_id': 21, 'mode': 'real', 'message': '别人的事件', 'created_at': '2026-11-16T09:00:00+00:00', 'owner': '别人'},
+            {
+                'id': 1,
+                'supplier_id': 11,
+                'mode': 'real',
+                'message': '采集完成',
+                'created_at': '2026-11-16T09:00:00+00:00',
+                'owner': '小姜',
+            },
+            {
+                'id': 2,
+                'supplier_id': 21,
+                'mode': 'real',
+                'message': '别人的事件',
+                'created_at': '2026-11-16T09:00:00+00:00',
+                'owner': '别人',
+            },
         ],
         'history': [
-            {'id': 1, 'supplier_id': 11, 'mode': 'real', 'offers': [{'model': 'kimi-k3.1-pro'}], 'created_at': '2026-11-16T09:00:00+00:00', 'owner': '小姜'},
-            {'id': 2, 'supplier_id': 21, 'mode': 'real', 'offers': [], 'created_at': '2026-11-16T09:00:00+00:00', 'owner': '别人'},
+            {
+                'id': 1,
+                'supplier_id': 11,
+                'mode': 'real',
+                'offers': [{'model': 'kimi-k3.1-pro'}],
+                'created_at': '2026-11-16T09:00:00+00:00',
+                'owner': '小姜',
+            },
+            {
+                'id': 2,
+                'supplier_id': 21,
+                'mode': 'real',
+                'offers': [],
+                'created_at': '2026-11-16T09:00:00+00:00',
+                'owner': '别人',
+            },
         ],
         'drafts': [
-            {'id': 1, 'supplier_id': 11, 'subject': '报价', 'body': '正文', 'created_at': '2026-11-16T09:05:00+00:00', 'owner': '小姜'},
-            {'id': 2, 'supplier_id': 21, 'subject': '别人的草稿', 'body': '正文', 'created_at': '2026-11-16T09:05:00+00:00', 'owner': '别人'},
+            {
+                'id': 1,
+                'supplier_id': 11,
+                'subject': '报价',
+                'body': '正文',
+                'created_at': '2026-11-16T09:05:00+00:00',
+                'owner': '小姜',
+            },
+            {
+                'id': 2,
+                'supplier_id': 21,
+                'subject': '别人的草稿',
+                'body': '正文',
+                'created_at': '2026-11-16T09:05:00+00:00',
+                'owner': '别人',
+            },
         ],
         'settings': [
             {'key': 'model-service:user:小姜', 'value': '{"api_key":"sk-secret"}', 'owner': '小姜'},
@@ -197,10 +239,20 @@ class CopyCloudToLocalTests(unittest.TestCase):
         tables = cloud_tables()
         for index in range(45):
             tables['suppliers'].append(
-                {'id': 100 + index, 'url': 'https://bulk%d.example' % index, 'name': '批量 %d' % index,
-                 'mode': 'real', 'status': 'pending', 'contacts': {}, 'offers': [], 'sources': [],
-                 'warnings': [], 'owner': '小姜',
-                 'created_at': '2026-11-16T09:00:00+00:00', 'checked_at': None}
+                {
+                    'id': 100 + index,
+                    'url': 'https://bulk%d.example' % index,
+                    'name': '批量 %d' % index,
+                    'mode': 'real',
+                    'status': 'pending',
+                    'contacts': {},
+                    'offers': [],
+                    'sources': [],
+                    'warnings': [],
+                    'owner': '小姜',
+                    'created_at': '2026-11-16T09:00:00+00:00',
+                    'checked_at': None,
+                }
             )
         store = FakeCloudStore('小姜', tables)
         counts, _ = copy_cloud_to_local('小姜', self.path, store=store)
@@ -214,8 +266,13 @@ class CopyCloudToLocalTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             copy_cloud_to_local('小姜', self.path, store=self.store)
         with contextlib.closing(sqlite3.connect(self.path)) as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM suppliers WHERE url='https://local.example'").fetchone()[0], 1)
-            self.assertEqual(db.execute("SELECT count(*) FROM suppliers WHERE url='https://a.example'").fetchone()[0], 0)
+            self.assertEqual(
+                db.execute("SELECT count(*) FROM suppliers WHERE url='https://local.example'").fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                db.execute("SELECT count(*) FROM suppliers WHERE url='https://a.example'").fetchone()[0], 0
+            )
 
     def test_backs_up_existing_local_file_before_writing(self):
         Store(self.path, seed=False)

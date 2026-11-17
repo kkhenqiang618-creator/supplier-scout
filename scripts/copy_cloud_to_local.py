@@ -61,12 +61,10 @@ def _fetch(db, table, ids):
     """
     rows = []
     for start in range(0, len(ids), PAGE_SIZE):
-        chunk = ids[start:start + PAGE_SIZE]
+        chunk = ids[start : start + PAGE_SIZE]
         batch = [
             dict(row)
-            for row in db.execute(
-                'SELECT * FROM ' + table + ' WHERE id = ANY(%s) ORDER BY id', (chunk,)
-            )
+            for row in db.execute('SELECT * FROM ' + table + ' WHERE id = ANY(%s) ORDER BY id', (chunk,))
         ]
         rows.extend(batch)
     return rows
@@ -204,12 +202,21 @@ def copy_cloud_to_local(owner, local_path=None, store=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='把云端某个账号的记录只读复制到本机 SQLite（P28）')
     parser.add_argument('--owner', required=True, help='要复制的云端账号名')
-    parser.add_argument('--local', default=str(DEFAULT_LOCAL), help='本机 SQLite 路径（默认 data/supplier.db）')
+    parser.add_argument(
+        '--local', default=str(DEFAULT_LOCAL), help='本机 SQLite 路径（默认 data/supplier.db）'
+    )
     args = parser.parse_args(argv)
     counts, backup = copy_cloud_to_local(args.owner, args.local)
     if backup:
         print('已备份本机库：' + backup.name)
-    names = {'suppliers': '供应商', 'events': '事件', 'history': '历史', 'drafts': '草稿', 'followups': '跟进记录', 'rules': '规则'}
+    names = {
+        'suppliers': '供应商',
+        'events': '事件',
+        'history': '历史',
+        'drafts': '草稿',
+        'followups': '跟进记录',
+        'rules': '规则',
+    }
     for key in ('suppliers', 'events', 'history', 'drafts', 'followups', 'rules'):
         print('%s：%d 条' % (names[key], counts[key]))
     return 0
