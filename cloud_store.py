@@ -318,10 +318,12 @@ class PostgresLoginLimiter:
 
 
 class PostgresStore(Store):
-    def __init__(self, database=None, bootstrap=True):
+    def __init__(self, database=None, bootstrap=True, model_service=True):
         self.database = database or Database()
         self.lock = threading.RLock()
-        self.model_service = CloudModelService(self.database)
+        # Read-only callers (the local copy script) have no encryption key and must
+        # not construct the model service, which decrypts keys on first use.
+        self.model_service = CloudModelService(self.database) if model_service else None
         self.path = 'postgres'
         if bootstrap:
             with self.database.transaction(write=True) as db:
@@ -337,6 +339,9 @@ class PostgresStore(Store):
         scoped.username = username
         scoped.database = self.database.for_user(username)
         scoped.is_admin = username == os.environ.get('SCOUT_ADMIN_USERNAME', '')
+        if self.model_service is None:
+            scoped.model_service = None
+            return scoped
         scoped.model_service = copy.copy(self.model_service)
         scoped.model_service.lock = threading.RLock()
         scoped.model_service.database = scoped.database

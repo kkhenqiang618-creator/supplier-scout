@@ -15,6 +15,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -43,12 +44,64 @@ def _text(column, value):
     return str(value)
 
 
+PAGE_SIZE = 20
+WORKERS = 6
+
+
+def _ids(db, table):
+    return [row['id'] for row in db.execute('SELECT id FROM ' + table + ' ORDER BY id')]
+
+
+def _fetch(db, table, ids):
+    """Read the given ids on this connection, in small messages.
+
+    Supplier rows carry the collected page snapshots (hundreds of KB each). A single
+    large result makes the managed pooler stall, and one connection only gets a few
+    KB per second, so the ids are split across a handful of parallel readers.
+    """
+    rows = []
+    for start in range(0, len(ids), PAGE_SIZE):
+        chunk = ids[start:start + PAGE_SIZE]
+        batch = [
+            dict(row)
+            for row in db.execute(
+                'SELECT * FROM ' + table + ' WHERE id = ANY(%s) ORDER BY id', (chunk,)
+            )
+        ]
+        rows.extend(batch)
+    return rows
+
+
+def _read_table(db, table, workers=WORKERS):
+    with db.transaction(write=False) as conn:
+        ids = _ids(conn, table)
+    if not ids:
+        return []
+    if len(ids) < PAGE_SIZE or workers <= 1:
+        with db.transaction(write=False) as conn:
+            return _fetch(conn, table, ids)
+    buckets = [ids[index::workers] for index in range(workers)]
+    results = [None] * workers
+
+    def work(index):
+        with db.transaction(write=False) as conn:
+            results[index] = _fetch(conn, table, buckets[index])
+
+    threads = [threading.Thread(target=work, args=(index,)) for index in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    rows = [row for bucket in results if bucket for row in bucket]
+    rows.sort(key=lambda row: row['id'])
+    return rows
+
+
 def read_cloud(store):
     """Everything the local workspace needs, read-only and scoped to the store's account."""
     rows = {}
-    with store.database.transaction(write=False) as db:
-        for table in TABLES:
-            rows[table] = [dict(row) for row in db.execute('SELECT * FROM ' + table + ' ORDER BY id')]
+    for table in TABLES:
+        rows[table] = _read_table(store.database, table)
     rows['followups'] = store.followups()
     rows['rules'] = store.rules()
     return rows
@@ -119,7 +172,8 @@ def copy_cloud_to_local(owner, local_path=None, store=None):
             raise SystemExit('请先设置 DATABASE_URL 环境变量（只从环境读取，不写进文件或日志）')
         from cloud_store import PostgresStore
 
-        store = PostgresStore(bootstrap=False).for_user(owner)
+        store = PostgresStore(bootstrap=False, model_service=False).for_user(owner)
+    print('正在读取云端数据（页面快照较大，可能需要几分钟）…', flush=True)
     rows = read_cloud(store)
     backup = _backup(path)
     local = Store(path, seed=False)
