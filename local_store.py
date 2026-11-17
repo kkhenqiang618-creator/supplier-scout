@@ -36,6 +36,7 @@ class Store:
         self.model_service = ModelService(Path(path).with_name('model-service.json'))
         self.search_service = SearchService(Path(path).with_name('search-service.json'))
         self.discovery_job = self._discovery_idle()
+        self.discovery_stop_event = threading.Event()
         self.lock = threading.RLock()
         self.job_lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -558,6 +559,7 @@ class Store:
     def _discovery_idle():
         return {
             'status': 'idle',
+            'stopping': False,
             'stage': '',
             'done': 0,
             'total': 0,
@@ -584,13 +586,25 @@ class Store:
         except Exception as error:  # the page must show why a round died, not a stuck bar
             self._discovery_report(
                 status='failed',
+                stopping=False,
                 stage='失败',
                 error=str(error) or error.__class__.__name__,
                 finished_at=now(),
             )
             return
+        if summary.get('cancelled'):
+            self._discovery_report(
+                status='stopped',
+                stopping=False,
+                stage='已终止',
+                note='本轮已完成的结果已保存；再次开始会重新探测。',
+                finished_at=now(),
+                summary=summary,
+            )
+            return
         self._discovery_report(
             status='done',
+            stopping=False,
             stage='完成',
             done=self.discovery_job.get('total') or 0,
             finished_at=now(),
@@ -607,8 +621,11 @@ class Store:
     def discovery_start(self, source='', queries=None):
         """Run one round in the background; the page polls the counter instead of waiting."""
         with self.lock:
-            if self.discovery_job.get('status') == 'running':
-                raise ValueError('发现任务正在运行，请等这一轮结束')
+            if self.discovery_job.get('status') in ('running', 'stopping'):
+                raise ValueError('发现任务正在运行，请先终止或等这一轮结束')
+            # A fresh event per round: probe threads of a stopped round keep their
+            # own (set) flag instead of seeing the next round's clear flag.
+            self.discovery_stop_event = threading.Event()
             self.discovery_job = dict(
                 self._discovery_idle(),
                 status='running',
@@ -623,6 +640,19 @@ class Store:
         )
         thread.start()
         return {'started': True, 'progress': self.discovery_progress()}
+
+    def discovery_stop(self):
+        """Ask the running round to stop; finished probes are still stored."""
+        with self.lock:
+            if self.discovery_job.get('status') in ('running', 'stopping'):
+                self.discovery_stop_event.set()
+                self.discovery_job.update(
+                    status='stopping',
+                    stopping=True,
+                    stage='正在终止，等待当前请求返回',
+                    note='已完成的探测结果会保留。',
+                )
+            return dict(self.discovery_job)
 
     def discovery_round(self, source='', queries=None, progress=None):
         """Gather the saved inputs, run the a->c->b round, store the probes."""
@@ -644,6 +674,7 @@ class Store:
             exclude=service.get('exclude') or [],
             aliases=discovery.rules_aliases(self.rules()),
             progress=progress,
+            cancel=self.discovery_stop_event.is_set,
         )
         self._save_discovery(result['probes'])
         summary = dict(result['summary'])
@@ -989,9 +1020,9 @@ class Store:
                 raise ValueError(service['key_error'] + '；请重新填写后再开始采集')
             if not service['configured']:
                 raise ValueError('请先在模型服务设置中填写 API URL、模型名和 API Key')
-            from browser_agent import runtime_paths
+            from browser_agent import ensure_collect_runtime
 
-            runtime_paths()
+            ensure_collect_runtime()
         if not self.job_lock.acquire(blocking=False):
             raise ValueError('已有批次运行，请等待完成')
         rows = [

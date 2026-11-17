@@ -18,7 +18,7 @@ class LocalTransientTests(unittest.TestCase):
     def run_with(self, store, side_effect):
         with (
             patch.object(local_store, 'collect_site', side_effect=side_effect),
-            patch('browser_agent.runtime_paths', return_value=('moli', 'playwright')),
+            patch('browser_agent.ensure_collect_runtime'),
             patch.object(
                 type(store.model_service),
                 'public',
@@ -27,6 +27,41 @@ class LocalTransientTests(unittest.TestCase):
         ):
             store.start_job('real', scope='contacts')
             store.job_thread.join(timeout=5)
+
+    def test_start_job_allows_the_chrome_fallback_without_moli(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = self.make(folder, 1)
+            with (
+                patch('browser_agent.find_moli', return_value=None),
+                patch('browser_agent.chrome_enabled', return_value=True),
+                patch('browser_agent.chrome_available', return_value=True),
+                patch.object(Store, 'run_job', lambda self, *args: None),
+                patch.object(
+                    type(store.model_service),
+                    'public',
+                    return_value={'configured': True, 'tested': True, 'key_error': None},
+                ),
+            ):
+                job = store.start_job('real', scope='contacts')
+        self.assertTrue(job['running'])
+        self.assertEqual(job['mode'], 'real')
+
+    def test_start_job_still_stops_without_any_browser_runtime(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = self.make(folder, 1)
+            with (
+                patch('browser_agent.find_moli', return_value=None),
+                patch('browser_agent.chrome_enabled', return_value=True),
+                patch('browser_agent.chrome_available', return_value=False),
+                patch.object(
+                    type(store.model_service),
+                    'public',
+                    return_value={'configured': True, 'tested': True, 'key_error': None},
+                ),
+            ):
+                with self.assertRaises(ValueError) as caught:
+                    store.start_job('real', scope='contacts')
+        self.assertIn('浏览器运行环境未就绪', str(caught.exception))
 
     def test_agent_error_while_stopping_does_not_save_the_partial_site(self):
         from server import AgentServiceError

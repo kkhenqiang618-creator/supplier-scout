@@ -755,7 +755,7 @@ class WiringTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as folder,
             patch('egress_proxy.GuardProxy', Proxy),
-            patch('browser_agent.runtime_paths', return_value=('moli', 'pw')),
+            patch('browser_agent.playwright_module', return_value='pw'),
             patch.object(
                 browser_agent.Browser,
                 '_spawn',

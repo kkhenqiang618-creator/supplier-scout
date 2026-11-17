@@ -352,6 +352,15 @@ def runtime_paths():
     return binary, module
 
 
+def ensure_collect_runtime():
+    """Preflight for a real batch: Moli, or the enabled Chrome fallback, must be usable (P32)."""
+    if find_moli():
+        return
+    if chrome_enabled() and chrome_available():
+        return
+    raise BrowserRuntimeError('浏览器运行环境未就绪（后台缺少 Moli 或 Playwright），批次已停止')
+
+
 def playwright_module():
     """Playwright module alone: the Chrome fallback does not need Moli (P32)."""
     module = find_playwright()
@@ -2011,17 +2020,22 @@ def _run_site(
         if not enabled:
             raise BrowserRuntimeError('浏览器运行环境未就绪（后台缺少 Moli 或 Playwright），批次已停止')
         log('本机没有 Moli，直接使用 Chrome 备用浏览器')
-        chrome = run_agent(
-            url,
-            scope,
-            service,
-            rules,
-            log,
-            browser_factory=chrome_factory,
-            deadline=site_end,
-            clock=clock,
-            extended_deadline=extended_end,
-        )
+        try:
+            chrome = run_agent(
+                url,
+                scope,
+                service,
+                rules,
+                log,
+                browser_factory=chrome_factory,
+                deadline=site_end,
+                clock=clock,
+                extended_deadline=extended_end,
+            )
+        except (AgentServiceError, ModelTransientSiteError) as error:
+            # Same contract as the Chrome retry below: keep evidence, drop internal fields.
+            error.partial = strip_internal(error.partial or {})
+            raise
         return strip_internal(chrome)
 
     def moli_run(escalate):
