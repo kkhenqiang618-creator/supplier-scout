@@ -1,5 +1,5 @@
 'use strict';
-/* 「发现」页：探测已有名单 → DeepSeek 关键词搜索 → 滚雪球，再只读探测 new-api / K3.1 Pro（P25，仅本机）。 */
+/* 「发现」页：探测供应商名单 → DeepSeek 关键词搜索 → 从已保存来源抽外链，再只读探测 new-api / K3.1 Pro（P25，仅本机）。 */
 (()=>{
  const STATUS={new:'新发现',ignored:'已忽略',enqueued:'已入队'};
  let discoRows=null,discoLoading=false,discoError='',discoNote='',discoBusy=false,discoProgress=null,discoPoll=null;
@@ -30,7 +30,7 @@
   const title=heading('发现','一键依次探测已有名单、用 DeepSeek 搜索找站、再从来源页滚一层外链，最后只读检查是否为 new-api、是否转售 K3.1 Pro。不会登录、注册或下单。','','DISCOVERY');
   const search=state?.search_service||{};
   const searchText=search.key_error?'搜索 Key 无法解密，请到「能力接入-模型服务与外部接入」重新填写':search.configured?'搜索已接入（关键词和排除站点在「能力接入-模型服务与外部接入」里改）':'搜索未接入：未填写 DeepSeek 搜索 Key，本轮会跳过搜索这一步';
-  const form=panel('自动发现',`<div class="settings-content"><div class="form-note">顺序：① 探测已有候选 → ② DeepSeek 关键词搜索 → ③ 从来源页滚一层外链。${esc(searchText)}</div><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" data-disco-run ${discoBusy?'disabled':''}>${I('globe')}开始发现</button><button class="btn" data-disco-recheck ${discoBusy?'disabled':''}>${I('refresh')}检查已有名单</button></div><label class="field" style="margin-top:14px">人工粘贴网址（可选，仅在需要时补一个来源页）<input id="disco-source" placeholder="例如 https://example.com" autocomplete="off"></label><div><button class="btn small" data-disco-paste ${discoBusy?'disabled':''}>只查这个来源页</button></div><div class="form-note" id="disco-note">${esc(discoNote||'只读取候选站的 /api/status、/api/pricing；遵守 robots.txt，超时 10 秒、并发 4、每轮最多 200 个主机、最多 20 次搜索。')}</div>${progressBlock()}</div>`);
+  const form=panel('自动发现',`<div class="settings-content"><div class="form-note">顺序：① 探测供应商名单里的全部网址 → ② DeepSeek 关键词搜索 → ③ 从已保存的来源原文和 /api/status 里抽外链（不再重复抓页面）。${esc(searchText)}</div><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" data-disco-run ${discoBusy?'disabled':''}>${I('globe')}开始发现</button><button class="btn" data-disco-recheck ${discoBusy?'disabled':''}>${I('refresh')}检查已有名单</button></div><label class="field" style="margin-top:14px">人工粘贴网址（可选，仅在需要时补一个来源页）<input id="disco-source" placeholder="例如 https://example.com" autocomplete="off"></label><div><button class="btn small" data-disco-paste ${discoBusy?'disabled':''}>只查这个来源页</button></div><div class="form-note" id="disco-note">${esc(discoNote||'只读取候选站的 /api/status、/api/pricing；遵守 robots.txt，超时 10 秒、并发 4、每轮最多 200 个主机、最多 20 次搜索。')}</div>${progressBlock()}</div>`);
   if(discoRows===null){
    if(!discoLoading&&!discoError)void load();
    return title+form+`<div class="panel empty" role="status">${discoError?`读取失败：${esc(discoError)}`:'正在读取发现名单…'}</div>`;
@@ -52,9 +52,10 @@
   return '';
  }
  function summaryBlock(s){
-  const parts=[`探测已有主机 ${s.probed} 个`];
+  const parts=[`探测供应商主机 ${s.probed} 个`];
   if(s.search_calls)parts.push(`搜索 ${s.search_calls} 次，找到 ${s.search_hosts} 个主机`);
-  if(s.snowball_pages)parts.push(`滚动 ${s.snowball_pages} 个来源页，找到 ${s.snowball_hosts} 个主机`);
+  if(s.snowball_sources)parts.push(`扫描 ${s.snowball_sources} 段已存来源，找到 ${s.snowball_hosts} 个主机`);
+  if(s.pasted_hosts)parts.push(`粘贴来源找到 ${s.pasted_hosts} 个主机`);
   parts.push(`新增候选 ${s.new_hosts} 个`);
   let text='上一轮：'+parts.join('；')+'。';
   if((s.skipped||[]).length)text+=' '+(s.skipped||[]).join('；')+'。';
@@ -86,10 +87,10 @@
  const note=n=>{discoNote=n;if(page==='discovery')renderApp();};
  function pick(){return [...checked];}
  async function run(){
-  const typed=($('#disco-source')?.value||'').split(/[\s,，]+/).map(item=>item.trim()).filter(Boolean);
+  const typed=($('#disco-source')?.value||'').trim();
   discoBusy=true;discoNote='已开始，后台运行中，可离开本页再回来；进度会一直更新。';if(page==='discovery')renderApp();
   try{
-   const data=await api('discovery/run',{sources:typed});
+   const data=await api('discovery',typed?{source:typed}:{});
    discoProgress=data.progress||null;checked.clear();
    await load();
   }catch(e){

@@ -259,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             path = urlsplit(self.path).path
             store = self.store
-            if path.startswith('/api/discovery') and not self.LOCAL_ONLY:
+            if not self.LOCAL_ONLY and (path.startswith('/api/discovery') or path == '/api/search-service'):
                 return self.send({'error': '路径不存在'}, 404)
             if not isinstance(data, dict):
                 raise ValueError('请求须为 JSON 对象')
@@ -330,9 +330,8 @@ class Handler(BaseHTTPRequestHandler):
                 options = {'recipient': data['recipient']} if 'recipient' in data else {}
                 result = store.save_draft(int(data['id']), data.get('subject'), data.get('body'), **options)
             elif path == '/api/discovery':
-                result = store.discovery_start([data.get('source', '')], None, True)
-            elif path == '/api/discovery/run':
-                result = store.discovery_start(data.get('sources'), data.get('queries'))
+                # One start endpoint: an optional pasted source joins the round.
+                result = store.discovery_start(data.get('source', ''), data.get('queries'))
             elif path == '/api/discovery/recheck':
                 result = store.discovery_recheck(data.get('ids'))
             elif path == '/api/discovery/ignore':

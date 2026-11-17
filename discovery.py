@@ -1,9 +1,10 @@
 """Read-only discovery of resellers that offer Kimi K3.1 Pro (P25).
 
-Nothing here logs in, registers or posts: the discovery page probes the hosts it
-already knows, asks the DeepSeek Search API for pages that resell K3.1 Pro, and
-follows the outbound links of the saved source pages one level deep. Every host
-is then read once through its public ``/api/status`` and ``/api/pricing``.
+Nothing here logs in, registers or posts. One round runs in the order P25 asks
+for: (a) probe every saved supplier host, (c) ask the DeepSeek Search API for
+pages that resell K3.1 Pro, then (b) mine the source texts already saved with the
+suppliers and the ``/api/status`` text of new-api hosts for outbound links. No
+saved page is fetched a second time.
 
 The module is deliberately free of store access so the network layer can be
 replaced in tests; ``fetch_text`` and ``search_request`` are the only egress
@@ -62,36 +63,15 @@ TEXT_URL = re.compile(r'https?://[^\s<>"\'`\]\[(){}，。；：！？、]+', re.
 
 
 def fetch_text(url):
-    """One public GET (10s) returning decoded text; JSON is decoded by the caller."""
-    validate_url(url)
-    request = urllib.request.Request(
-        url,
-        headers={
-            'User-Agent': UA,
-            'Accept': 'text/html,application/json,text/plain',
-        },
-    )
-    from browser_egress import collection_opener
+    """One public GET (10s) through the shared egress; JSON is decoded by the caller.
 
-    with collection_opener(SafeRedirect) as opener:
-        with opener.open(request, timeout=TIMEOUT) as response:
-            ctype = response.headers.get_content_type()
-            if ctype not in (
-                'text/html',
-                'text/plain',
-                'application/xhtml+xml',
-                'application/json',
-            ):
-                raise ValueError('来源页不是网页或 JSON')
-            charset = response.headers.get_content_charset() or 'utf-8'
-            raw = response.read(MAX_BYTES + 1)
-            final = response.url
-    if len(raw) > MAX_BYTES:
-        raise ValueError('页面超过 400KB 限制')
-    try:
-        return raw.decode(charset, errors='replace'), final
-    except LookupError:
-        return raw.decode('utf-8', errors='replace'), final
+    Reuses ``browser_agent.fetch_public_api`` so the address checks that the
+    browser code already applies (peer IP, redirects) are not duplicated here.
+    Tests replace this function.
+    """
+    from browser_agent import fetch_public_api
+
+    return fetch_public_api(url, timeout=TIMEOUT)
 
 
 def origin_of(url):
@@ -283,6 +263,9 @@ def status_details(payload):
         'price': data.get('price'),
         'quota_per_unit': data.get('quota_per_unit'),
         'announcement': api_text(data),
+        # Saved so the round can mine outbound links from the status page text (P25 b).
+        'footer_text': str(data.get('footer_html') or '')[:20000],
+        'about_text': str(data.get('about') or '')[:20000],
     }
     return details
 
@@ -430,43 +413,204 @@ def search_round(queries, api_key, count=SEARCH_COUNT, max_calls=SEARCH_MAX_CALL
     return {'calls': calls, 'hosts': found, 'errors': errors}
 
 
-def snowball_hosts(pages, exclude=(), max_pages=SNOWBALL_MAX_PAGES, progress=None):
-    """Fetch up to 12 saved source pages once and collect their outbound hosts."""
-    unique = []
-    for page in pages or []:
-        page = str(page or '').strip()
-        if page and page not in unique:
-            unique.append(page)
-        if len(unique) >= max_pages:
+def snowball_hosts(texts, exclude=(), progress=None):
+    """Outbound hosts written in saved texts; nothing is fetched again (P25 b).
+
+    ``texts`` items are ``{'label', 'url', 'text'}`` built from the source excerpts
+    stored with each supplier and from the ``/api/status`` footer/about text of the
+    new-api hosts probed in the same round.
+    """
+    hosts, seen, scanned = [], set(), 0
+    items = [item for item in texts or [] if str((item or {}).get('text') or '').strip()]
+    total = len(items)
+    for item in items:
+        label = str(item.get('label') or '')
+        url = str(item.get('url') or '')
+        for host in hosts_from_text(item.get('text')):
+            if host in seen or is_excluded(host, exclude):
+                continue
+            seen.add(host)
+            hosts.append({'host': host, 'found_by': label[:200], 'source_url': url})
+            if len(hosts) >= MAX_HOSTS:
+                break
+        scanned += 1
+        if progress:
+            progress(scanned, total, '')
+        if len(hosts) >= MAX_HOSTS:
+            break
+    return {'sources': scanned, 'hosts': hosts, 'errors': []}
+
+
+def _status_texts(probes):
+    """Text from /api/status footer/about/announcements for the snowball step."""
+    items = []
+    for probe in probes:
+        if not probe.get('status_raw'):
+            continue
+        parts = [
+            probe.get('footer_text') or '',
+            probe.get('about_text') or '',
+            probe.get('announcement') or '',
+        ]
+        text = '\n'.join(part for part in parts if part)
+        if text.strip():
+            items.append(
+                {
+                    'label': '滚雪球：' + str(probe.get('host') or '') + API_STATUS,
+                    'url': 'https://' + str(probe.get('host') or ''),
+                    'text': text,
+                }
+            )
+    return items
+
+
+def run_round(
+    suppliers=(),
+    known_hosts=(),
+    pasted=(),
+    queries=(),
+    api_key='',
+    key_error='',
+    exclude=(),
+    aliases=K31_ALIASES,
+    progress=None,
+):
+    """One a→c→b round; returns the probes to store and a summary for the page.
+
+    ``suppliers`` items are ``{'host', 'url', 'sources': [excerpt, ...]}``. Every
+    supplier host is probed (a), then the keyword table is searched (c) when a key
+    is configured, then the saved source texts and the status pages are mined for
+    outbound links (b) and only those outbound hosts are fetched. ``pasted`` holds
+    source URLs the user typed in by hand; those pages are fetched once.
+    """
+
+    def step(stage, done=0, total=0, note=''):
+        if progress:
+            progress(stage, done, total, note)
+
+    items = [item for item in suppliers or [] if isinstance(item, dict) and item.get('host')]
+    supplier_by_host = {}
+    for item in items:
+        supplier_by_host.setdefault(item['host'], item)
+    known = set(known_hosts or ())
+    todo = list(supplier_by_host) + [host for host in sorted(known) if host not in supplier_by_host]
+
+    # (a) probe every saved supplier URL, and refresh the candidates already listed
+    probed = probe_hosts(
+        todo,
+        aliases,
+        limit=None,
+        progress=lambda done, total, note: step('探测已有名单', done, total, note),
+    )
+    probes, supplier_probed = [], 0
+    for probe in probed:
+        host = probe['host']
+        item = supplier_by_host.get(host)
+        if item is not None:
+            probe['found_by'] = '已有名单'
+            probe['source_url'] = str(item.get('url') or '')
+            supplier_probed += 1
+            # A supplier with nothing to see does not need a row in the candidate list.
+            if not (probe.get('is_newapi') or probe.get('k31') or probe.get('selfhost_label')):
+                continue
+        probes.append(probe)
+
+    # (c) keyword search
+    skipped, errors, found, search_calls = [], [], [], 0
+    if key_error:
+        skipped.append('搜索：本机保存的 Key 无法解密，请重新填写')
+    elif not api_key:
+        skipped.append('搜索：未接入 DeepSeek 搜索 Key，已跳过')
+    elif not queries:
+        skipped.append('搜索：关键词表为空，已跳过')
+    else:
+        result = search_round(
+            queries,
+            api_key,
+            exclude=exclude,
+            progress=lambda done, total, note: step('搜索关键词', done, total, note),
+        )
+        found.extend(result['hosts'])
+        errors.extend(result['errors'])
+        search_calls = result['calls']
+
+    # (b) mine what is already saved: supplier source excerpts + status page text
+    step('整理已存来源', 0, 0, '')
+    texts = []
+    for item in items:
+        url = str(item.get('url') or '')
+        for text in item.get('sources') or []:
+            if str(text or '').strip():
+                texts.append({'label': '滚雪球：' + url[:80], 'url': url, 'text': str(text)})
+    texts.extend(_status_texts(probed))
+    snowball = snowball_hosts(
+        texts,
+        exclude=exclude,
+        progress=lambda done, total, note: step('整理已存来源', done, total, note),
+    )
+
+    # hand-pasted pages are the user's own input; fetch each once
+    pasted_hosts = []
+    pasted_urls = [str(value).strip() for value in pasted or [] if str(value).strip()]
+    paste_ok = 0
+    paste_errors = []
+    for index, source in enumerate(pasted_urls):
+        step('粘贴来源页', index, len(pasted_urls), source[:80])
+        try:
+            page = discover(source)
+        except (ValueError, OSError) as error:
+            paste_errors.append(str(error)[:200] or error.__class__.__name__)
+            continue
+        paste_ok += 1
+        for host in page['hosts']:
+            pasted_hosts.append(
+                {'host': host, 'found_by': '粘贴：' + source[:120], 'source_url': page['source_url']}
+            )
+    if pasted_urls and not paste_ok:
+        raise ValueError(paste_errors[0] if paste_errors else '来源页打不开，没有可探测的主机')
+    errors.extend(paste_errors)
+
+    # merge the new hosts, drop suppliers and hosts that were already probed
+    targets, seen, origins = [], set(), {}
+    for item in found + snowball['hosts'] + pasted_hosts:
+        host = item['host']
+        if (
+            not host
+            or host in supplier_by_host
+            or host in known
+            or host in seen
+            or is_excluded(host, exclude)
+        ):
+            continue
+        seen.add(host)
+        origins[host] = item
+        targets.append(host)
+        if len(targets) >= MAX_HOSTS:
             break
 
-    def one(page):
-        try:
-            return discover(page)
-        except Exception as error:
-            return {'error': str(error) or error.__class__.__name__}
+    for probe in probe_hosts(
+        targets,
+        aliases,
+        progress=lambda done, total, note: step('探测新主机', done, total, note),
+    ):
+        origin = origins.get(probe['host'], {})
+        probe['found_by'] = origin.get('found_by', '')
+        probe['source_url'] = origin.get('source_url', '')
+        probes.append(probe)
 
-    hosts, seen, errors, done = [], set(), [], 0
-    if not unique:
-        return {'pages': 0, 'hosts': hosts, 'errors': errors}
-    total = len(unique)
-    workers = max(1, min(MAX_PARALLEL, len(unique)))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        for page, result in zip(unique, executor.map(one, unique)):
-            if 'error' in result:
-                errors.append(page + '：' + result['error'])
-                continue
-            done += 1
-            if progress:
-                progress(done, total, '滚动：' + page[:80])
-            for host in result.get('hosts') or []:
-                if host in seen or is_excluded(host, exclude):
-                    continue
-                seen.add(host)
-                hosts.append({'host': host, 'found_by': '滚雪球：' + page[:80], 'source_url': page})
-                if len(hosts) >= MAX_HOSTS:
-                    return {'pages': done, 'hosts': hosts, 'errors': errors}
-    return {'pages': done, 'hosts': hosts, 'errors': errors}
+    summary = {
+        'probed': supplier_probed,
+        'search_calls': search_calls,
+        'search_hosts': len(found),
+        'snowball_sources': snowball['sources'],
+        'snowball_hosts': len(snowball['hosts']),
+        'pasted_hosts': len(pasted_hosts),
+        'found_hosts': len(found) + len(snowball['hosts']) + len(pasted_hosts),
+        'new_hosts': len([host for host in targets if host not in known]),
+        'skipped': skipped,
+        'errors': errors[:10],
+    }
+    return {'probes': probes, 'summary': summary}
 
 
 def probe_host(host, aliases=K31_ALIASES):
@@ -548,15 +692,19 @@ def _now():
     return now()
 
 
-def probe_hosts(hosts, aliases=K31_ALIASES, max_parallel=MAX_PARALLEL, progress=None):
-    """Probe up to 200 hosts with at most four concurrent GET-only workers."""
+def probe_hosts(hosts, aliases=K31_ALIASES, max_parallel=MAX_PARALLEL, progress=None, limit=MAX_HOSTS):
+    """Probe hosts with at most four concurrent GET-only workers.
+
+    Newly discovered hosts are capped at ``limit``; the saved supplier list is probed
+    in full (``limit=None``) because P25 asks for every supplier URL.
+    """
     unique = []
     seen = set()
     for host in hosts:
         if host and host not in seen:
             seen.add(host)
             unique.append(host)
-        if len(unique) >= MAX_HOSTS:
+        if limit is not None and len(unique) >= limit:
             break
     if not unique:
         return []

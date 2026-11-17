@@ -281,17 +281,19 @@ class DiscoverySearchTests(unittest.TestCase):
         self.assertEqual([host['host'] for host in result['hosts']], ['good.example'])
         self.assertIn('429', result['errors'][0])
 
-    def test_snowball_follows_one_level_and_skips_excluded(self):
-        site = FakeSite(site_pages())
-        with (
-            mock.patch.object(discovery, 'fetch_text', site.fetch),
-            mock.patch.object(discovery, 'validate_url', lambda url: url),
-        ):
-            result = discovery.snowball_hosts(['https://directory.example/'], exclude=['beta.example'])
-        self.assertEqual(result['pages'], 1)
-        self.assertEqual(
-            [host['host'] for host in result['hosts']], ['alpha.example', 'gamma.example', 'epsilon.example']
-        )
+    def test_snowball_reads_saved_texts_without_fetching(self):
+        texts = [
+            {
+                'label': '滚雪球：https://a.example/',
+                'url': 'https://a.example/',
+                'text': '链接 https://alpha.example/ 与 https://beta.example/x',
+            },
+            {'label': '滚雪球：b', 'url': '', 'text': '重复 https://alpha.example/ 和 https://zhihu.com/'},
+        ]
+        with mock.patch.object(discovery, 'fetch_text', side_effect=AssertionError('不应再抓页面')):
+            result = discovery.snowball_hosts(texts, exclude=['zhihu.com'])
+        self.assertEqual(result['sources'], 2)
+        self.assertEqual([host['host'] for host in result['hosts']], ['alpha.example', 'beta.example'])
         self.assertTrue(result['hosts'][0]['found_by'].startswith('滚雪球：'))
 
 
@@ -305,41 +307,60 @@ class DiscoveryStoreTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def discover(self, source='directory.example'):
+    def run_round(self, source='', queries=None):
         with (
             mock.patch.object(discovery, 'fetch_text', self.site.fetch),
             mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
-            return self.store.discovery_discover(source)
+            return self.store.discovery_round(source, queries)
 
-    def test_discover_stores_candidates_with_k31_first(self):
-        result = self.discover()
+    def test_paste_stores_candidates_with_k31_first(self):
+        result = self.run_round('directory.example')
         self.assertEqual(result['found_hosts'], 4)
         self.assertEqual(result['new_hosts'], 4)
         hosts = [row['host'] for row in result['candidates']]
         self.assertEqual(hosts[0], 'alpha.example')
         self.assertEqual(sorted(hosts), ['alpha.example', 'beta.example', 'epsilon.example', 'gamma.example'])
         self.assertEqual(self.store.discovery_list()[0]['k31'][0]['model_name'], '[Alpha]kimi-k3.1-pro')
+        row = next(item for item in result['candidates'] if item['host'] == 'gamma.example')
+        self.assertEqual(row['found_by'], '粘贴：directory.example')
 
-    def test_known_supplier_hosts_are_not_added(self):
+    def test_every_supplier_host_is_probed(self):
+        self.store.import_rows([{'url': 'https://alpha.example/'}, {'url': 'https://beta.example/'}])
+        result = self.run_round()
+        self.assertEqual(result['probed'], 2)
+        rows = {row['host']: row for row in result['candidates']}
+        self.assertIn('alpha.example', rows)
+        self.assertEqual(rows['alpha.example']['found_by'], '已有名单')
+        self.assertEqual(len(rows['alpha.example']['k31']), 2)
+        self.assertEqual(rows['alpha.example']['source_url'], 'https://alpha.example')
+
+    def test_supplier_without_findings_stays_out_of_the_list(self):
+        self.store.import_rows([{'url': 'https://plain.example/'}])
+        result = self.run_round()
+        self.assertEqual(result['probed'], 1)
+        self.assertNotIn('plain.example', [row['host'] for row in result['candidates']])
+
+    def test_supplier_host_is_not_added_twice(self):
         self.store.import_rows([{'url': 'https://alpha.example/'}])
-        result = self.discover()
-        self.assertEqual(result['known_hosts'], 1)
+        result = self.run_round('directory.example')
+        hosts = [row['host'] for row in result['candidates']]
+        self.assertEqual(hosts.count('alpha.example'), 1)
         self.assertEqual(result['new_hosts'], 3)
-        self.assertNotIn('alpha.example', [row['host'] for row in result['candidates']])
+        self.assertEqual(self.store.discovery_list()[0]['found_by'], '已有名单')
 
     def test_rediscovery_updates_probe_but_keeps_status(self):
-        self.discover()
+        self.run_round('directory.example')
         beta = next(row for row in self.store.discovery_list() if row['host'] == 'beta.example')
         self.store.discovery_set_status([beta['id']], 'ignored')
         self.site.pages['https://beta.example/api/pricing'] = PRICING
-        self.discover()
+        self.run_round('directory.example')
         beta = next(row for row in self.store.discovery_list() if row['host'] == 'beta.example')
         self.assertEqual(beta['status'], 'ignored')
         self.assertEqual(len(beta['k31']), 2)
 
     def test_ignore_keeps_the_record(self):
-        self.discover()
+        self.run_round('directory.example')
         total = len(self.store.discovery_list())
         gamma = next(row for row in self.store.discovery_list() if row['host'] == 'gamma.example')
         self.store.discovery_set_status([gamma['id']], 'ignored')
@@ -348,7 +369,7 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.assertEqual(next(row for row in rows if row['id'] == gamma['id'])['status'], 'ignored')
 
     def test_enqueue_adds_suppliers_and_marks_status(self):
-        self.discover()
+        self.run_round('directory.example')
         beta = next(row for row in self.store.discovery_list() if row['host'] == 'beta.example')
         result = self.store.discovery_enqueue([beta['id']])
         self.assertEqual(result['added'], 1)
@@ -365,7 +386,7 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.assertEqual(again['duplicates'], 1)
 
     def test_recheck_keeps_status(self):
-        self.discover()
+        self.run_round('directory.example')
         alpha = next(row for row in self.store.discovery_list() if row['host'] == 'alpha.example')
         self.store.discovery_set_status([alpha['id']], 'ignored')
         with (
@@ -398,7 +419,7 @@ class DiscoveryStoreTests(unittest.TestCase):
                 discovery, 'search_request', mock.Mock(side_effect=lambda query, key, count=50: payload)
             ) as fake,
         ):
-            result = self.store.discovery_run()
+            result = self.store.discovery_round()
         self.assertEqual(fake.call_count, 1)
         self.assertEqual(result['search_calls'], 1)
         hosts = [row['host'] for row in result['candidates']]
@@ -406,14 +427,40 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.assertNotIn('zhihu.com', hosts)
         row = next(item for item in result['candidates'] if item['host'] == 'delta.example')
         self.assertEqual(row['found_by'], '搜索：kimi-k3.1-pro API 中转 lang:zh')
-        self.assertTrue(row['found_by'].startswith('搜索：'))
 
-    def test_run_without_search_key_skips_search(self):
+    def test_search_result_pages_are_not_fetched_again_for_links(self):
+        self.store.search_service.save({'api_key': 'test-key', 'queries': ['kimi-k3.1-pro']})
+        payload = {'results': [{'url': 'https://delta.example/', 'content': ''}]}
         with (
             mock.patch.object(discovery, 'fetch_text', self.site.fetch),
             mock.patch.object(discovery, 'validate_url', lambda url: url),
+            mock.patch.object(
+                discovery, 'search_request', mock.Mock(side_effect=lambda query, key, count=50: payload)
+            ),
+            # Crawling a page again would go through discover(); snowball must not call it.
+            mock.patch.object(discovery, 'discover', side_effect=AssertionError('不应重抓页面')),
         ):
-            result = self.store.discovery_run()
+            self.store.discovery_round()
+        self.assertIn('delta.example', [row['host'] for row in self.store.discovery_list()])
+
+    def test_snowball_reads_saved_sources_without_fetching_pages(self):
+        self.store.import_rows([{'url': 'https://alpha.example/'}])
+        sources = [
+            {'url': 'https://alpha.example/', 'excerpt': '友链 https://delta.example/ 与 https://zhihu.com/x'}
+        ]
+        with self.store.connect(write=True) as db:
+            row = db.execute("SELECT id FROM suppliers WHERE url LIKE 'https://alpha.example%'").fetchone()
+            db.execute('UPDATE suppliers SET sources=? WHERE id=?', (json.dumps(sources), row['id']))
+        with mock.patch.object(discovery, 'discover', side_effect=AssertionError('不应再抓页面')):
+            summary = self.store.discovery_round()
+        rows = {row['host']: row for row in summary['candidates']}
+        self.assertIn('delta.example', rows)
+        self.assertTrue(rows['delta.example']['found_by'].startswith('滚雪球：'))
+        self.assertNotIn('zhihu.com', rows)
+        self.assertGreaterEqual(summary['snowball_sources'], 1)
+
+    def test_run_without_search_key_skips_search(self):
+        result = self.run_round()
         self.assertEqual(result['search_calls'], 0)
         self.assertIn('未接入 DeepSeek 搜索 Key', result['skipped'][0])
         self.assertEqual(result['candidates'], [])
@@ -422,7 +469,7 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.store._save_discovery([{'host': 'alpha.example'}])
         seen = []
 
-        def fake_probe(hosts, aliases=None, max_parallel=4, progress=None):
+        def fake_probe(hosts, aliases=None, **kwargs):
             seen.append(list(aliases))
             return []
 
@@ -434,16 +481,17 @@ class DiscoveryStoreTests(unittest.TestCase):
             mock.patch.object(discovery, 'probe_hosts', fake_probe),
             mock.patch.object(discovery, 'search_round', lambda *a, **k: empty),
             mock.patch.object(
-                discovery, 'snowball_hosts', lambda *a, **k: {'pages': 0, 'hosts': [], 'errors': []}
+                discovery, 'snowball_hosts', lambda *a, **k: {'sources': 0, 'hosts': [], 'errors': []}
             ),
         ):
-            self.store.discovery_run()
+            self.store.discovery_round()
         self.assertEqual(seen[0], ['Kimi K3.1', 'K31X'])
 
     def test_start_runs_in_the_background_and_reports_progress(self):
         self.store._save_discovery([{'host': 'alpha.example'}, {'host': 'beta.example'}])
 
-        def fake_probe(hosts, aliases=None, max_parallel=4, progress=None):
+        def fake_probe(hosts, aliases=None, **kwargs):
+            progress = kwargs.get('progress')
             for index, host in enumerate(hosts, 1):
                 time.sleep(0.03)
                 if progress:
@@ -455,7 +503,7 @@ class DiscoveryStoreTests(unittest.TestCase):
             mock.patch.object(discovery, 'probe_hosts', fake_probe),
             mock.patch.object(discovery, 'search_round', lambda *a, **k: empty),
             mock.patch.object(
-                discovery, 'snowball_hosts', lambda *a, **k: {'pages': 0, 'hosts': [], 'errors': []}
+                discovery, 'snowball_hosts', lambda *a, **k: {'sources': 0, 'hosts': [], 'errors': []}
             ),
         ):
             started = self.store.discovery_start()
@@ -476,14 +524,7 @@ class DiscoveryStoreTests(unittest.TestCase):
         def boom(*args, **kwargs):
             raise RuntimeError('探测接口挂了')
 
-        empty = {'calls': 0, 'hosts': [], 'errors': []}
-        with (
-            mock.patch.object(discovery, 'probe_hosts', boom),
-            mock.patch.object(discovery, 'search_round', lambda *a, **k: empty),
-            mock.patch.object(
-                discovery, 'snowball_hosts', lambda *a, **k: {'pages': 0, 'hosts': [], 'errors': []}
-            ),
-        ):
+        with mock.patch.object(discovery, 'probe_hosts', boom):
             self.store.discovery_start()
             deadline = time.time() + 5
             while self.store.discovery_progress()['status'] == 'running' and time.time() < deadline:
@@ -493,12 +534,11 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.assertIn('探测接口挂了', progress['error'])
 
     def test_paste_runs_in_the_background_too(self):
-        site = FakeSite(site_pages())
         with (
-            mock.patch.object(discovery, 'fetch_text', site.fetch),
+            mock.patch.object(discovery, 'fetch_text', self.site.fetch),
             mock.patch.object(discovery, 'validate_url', lambda url: url),
         ):
-            started = self.store.discovery_start(['directory.example'], None, True)
+            started = self.store.discovery_start('directory.example')
             self.assertTrue(started['started'])
             deadline = time.time() + 5
             while self.store.discovery_progress()['status'] == 'running' and time.time() < deadline:
@@ -513,7 +553,7 @@ class DiscoveryStoreTests(unittest.TestCase):
         with mock.patch.object(
             discovery, 'discover', side_effect=ValueError('robots.txt 不允许访问该来源页')
         ):
-            self.store.discovery_start(['directory.example'], None, True)
+            self.store.discovery_start('directory.example')
             deadline = time.time() + 5
             while self.store.discovery_progress()['status'] == 'running' and time.time() < deadline:
                 time.sleep(0.02)
@@ -521,14 +561,10 @@ class DiscoveryStoreTests(unittest.TestCase):
         self.assertEqual(progress['status'], 'failed')
         self.assertIn('robots.txt', progress['error'])
 
-    def test_paste_without_a_source_is_refused(self):
-        with self.assertRaises(ValueError):
-            self.store.discovery_start(['  '], None, True)
-
-    def test_discover_records_the_pasted_source(self):
-        self.discover()
-        row = next(item for item in self.store.discovery_list() if item['host'] == 'gamma.example')
-        self.assertEqual(row['found_by'], '粘贴：directory.example')
+    def test_state_has_no_discovery_progress_and_keeps_search(self):
+        state = self.store.state(full=False)
+        self.assertNotIn('discovery', state)
+        self.assertIn('search_service', state)
 
     def test_handler_is_local_only_by_default(self):
         self.assertTrue(web_app.Handler.LOCAL_ONLY)

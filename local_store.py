@@ -375,9 +375,12 @@ class Store:
                         for r in db.execute('SELECT * FROM drafts ORDER BY id DESC')
                     ],
                     'job': dict(self.job),
-                    'discovery': dict(self.discovery_job),
                     'model_service': self.model_service.public(),
-                    'search_service': self.search_service.public(),
+                    **(
+                        {'search_service': self.search_service.public()}
+                        if getattr(self, 'search_service', None) is not None
+                        else {}
+                    ),
                     'integrations': {
                         'email': False,
                         'feishu': False,
@@ -528,26 +531,28 @@ class Store:
                 saved += 1
         return saved
 
-    def discovery_discover(self, source):
-        """Follow one pasted page, drop known suppliers, probe the rest read-only."""
-        import discovery
+    def discovery_suppliers(self):
+        """Saved supplier hosts with the source texts already stored for them."""
+        from discovery import canonical_host
 
-        found = discovery.discover(source)
-        known = self.supplier_hosts()
-        existing = self.discovery_hosts()
-        targets = [host for host in found['hosts'] if host and host not in known]
-        self._save_discovery(
-            discovery.probe_hosts(targets, discovery.rules_aliases(self.rules())),
-            found['source_url'],
-            '粘贴：' + str(source)[:120],
-        )
-        return {
-            'source_url': found['source_url'],
-            'found_hosts': len(found['hosts']),
-            'known_hosts': len(found['hosts']) - len(targets),
-            'new_hosts': len([host for host in targets if host not in existing]),
-            'candidates': self.discovery_list(),
-        }
+        with self.connect() as db:
+            rows = db.execute('SELECT url,sources FROM suppliers WHERE mode="real"').fetchall()
+        items = []
+        for row in rows:
+            host = canonical_host(row['url'])
+            if not host:
+                continue
+            try:
+                sources = load_json(row['sources'], [])
+            except ValueError:
+                sources = []
+            texts = [
+                str(item.get('excerpt') or '')
+                for item in sources
+                if isinstance(item, dict) and str(item.get('excerpt') or '').strip()
+            ]
+            items.append({'host': host, 'url': row['url'], 'sources': texts})
+        return items
 
     @staticmethod
     def _discovery_idle():
@@ -573,12 +578,9 @@ class Store:
                 self.discovery_job.update(changes)
             return dict(self.discovery_job)
 
-    def _discovery_worker(self, sources, queries, only_sources=False):
+    def _discovery_worker(self, source, queries):
         try:
-            if only_sources:
-                summary = self.discovery_paste(sources or [], progress=self._discovery_step)
-            else:
-                summary = self.discovery_run(sources, queries, progress=self._discovery_step)
+            summary = self.discovery_round(source, queries, progress=self._discovery_step)
         except Exception as error:  # the page must show why a round died, not a stuck bar
             self._discovery_report(
                 status='failed',
@@ -596,12 +598,14 @@ class Store:
         )
 
     def _discovery_step(self, stage, done, total, note=''):
-        self._discovery_report(stage=stage, done=done, total=total, note=note)
+        # A stage with nothing to do must not wipe the count of the previous one.
+        changes = {'stage': stage, 'done': done, 'note': note}
+        if total:
+            changes['total'] = total
+        self._discovery_report(**changes)
 
-    def discovery_start(self, sources=None, queries=None, only_sources=False):
+    def discovery_start(self, source='', queries=None):
         """Run one round in the background; the page polls the counter instead of waiting."""
-        if only_sources and not [str(item).strip() for item in sources or [] if str(item).strip()]:
-            raise ValueError('请先填写来源网址或域名')
         with self.lock:
             if self.discovery_job.get('status') == 'running':
                 raise ValueError('发现任务正在运行，请等这一轮结束')
@@ -613,156 +617,38 @@ class Store:
             )
         thread = threading.Thread(
             target=self._discovery_worker,
-            args=(sources, queries, only_sources),
+            args=(source, queries),
             name='discovery-round',
             daemon=True,
         )
         thread.start()
         return {'started': True, 'progress': self.discovery_progress()}
 
-    def discovery_paste(self, sources, progress=None):
-        """Probe the outlinks of the pasted pages only; search and snowball stay out."""
+    def discovery_round(self, source='', queries=None, progress=None):
+        """Gather the saved inputs, run the a->c->b round, store the probes."""
         import discovery
-
-        aliases = discovery.rules_aliases(self.rules())
-        known = self.supplier_hosts()
-        pages = [str(item).strip() for item in sources or [] if str(item).strip()]
-        total = len(pages) or 1
-        probed, found, errors, pages_ok = 0, 0, [], 0
-        for index, source in enumerate(pages):
-            if progress:
-                progress('粘贴来源页', index, total, source[:80])
-            try:
-                page = discovery.discover(source)
-            except (ValueError, OSError) as error:
-                errors.append(str(error)[:200])
-                continue
-            pages_ok += 1
-            targets = [host for host in page['hosts'] if host and host not in known]
-            probes = discovery.probe_hosts(targets, aliases) if targets else []
-            probed += len(probes)
-            found += len(page['hosts'])
-            self._save_discovery(probes, page['source_url'], '粘贴：' + source[:120])
-            if progress:
-                progress('粘贴来源页', index + 1, total, source[:80])
-        if pages and not pages_ok:
-            raise ValueError(errors[0] if errors else '来源页打不开，没有可探测的主机')
-        return {
-            'probed': probed,
-            'search_calls': 0,
-            'search_hosts': 0,
-            'snowball_pages': 0,
-            'snowball_hosts': 0,
-            'new_hosts': probed,
-            'found_hosts': found,
-            'skipped': [],
-            'errors': errors[:10],
-            'candidates': self.discovery_list(),
-        }
-
-    def discovery_run(self, sources=None, queries=None, progress=None):
-        """One round of P25: probe known hosts, search the keywords, snowball once.
-
-        `progress(stage, done, total, note)` fires as each step finishes, so the page can
-        show a moving counter instead of a spinning button.
-        """
-        import discovery
-
-        def step(stage, done, total, note=''):
-            if progress:
-                progress(stage, done, total, note)
 
         service = self.search_service.read()
-        exclude = service.get('exclude') or []
         keywords = [
             str(query).strip()
             for query in (queries if queries is not None else service.get('queries') or [])
             if str(query).strip()
         ]
-        known = self.supplier_hosts()
-        existing = self.discovery_hosts()
-        aliases = discovery.rules_aliases(self.rules())
-        report = {
-            'probed': 0,
-            'search_calls': 0,
-            'search_hosts': 0,
-            'snowball_pages': 0,
-            'snowball_hosts': 0,
-            'skipped': [],
-            'errors': [],
-        }
-        probes = []
-        if existing:
-            probes.extend(
-                discovery.probe_hosts(
-                    sorted(existing),
-                    aliases,
-                    progress=lambda done, total, note: step('探测已有名单', done, total, note),
-                )
-            )
-            report['probed'] = len(probes)
-        found = []
-        api_key = service.get('api_key') or ''
-        if service.get('key_error'):
-            report['skipped'].append('搜索：本机保存的 Key 无法解密，请重新填写')
-        elif not api_key:
-            report['skipped'].append('搜索：未接入 DeepSeek 搜索 Key，已跳过')
-        elif not keywords:
-            report['skipped'].append('搜索：关键词表为空，已跳过')
-        else:
-            result = discovery.search_round(
-                keywords,
-                api_key,
-                exclude=exclude,
-                progress=lambda done, total, note: step('搜索关键词', done, total, note),
-            )
-            report['search_calls'] = result['calls']
-            report['search_hosts'] = len(result['hosts'])
-            report['errors'].extend(result['errors'])
-            found.extend(result['hosts'])
-        pages = [str(source).strip() for source in (sources or []) if str(source).strip()]
-        pages.extend(item['source_url'] for item in found if item.get('source_url'))
-        snowball = discovery.snowball_hosts(
-            pages,
-            exclude=exclude,
-            progress=lambda done, total, note: step('滚动来源页', done, total, note),
+        result = discovery.run_round(
+            suppliers=self.discovery_suppliers(),
+            known_hosts=sorted(self.discovery_hosts()),
+            pasted=[source] if str(source or '').strip() else [],
+            queries=keywords,
+            api_key=service.get('api_key') or '',
+            key_error=service.get('key_error') or '',
+            exclude=service.get('exclude') or [],
+            aliases=discovery.rules_aliases(self.rules()),
+            progress=progress,
         )
-        report['snowball_pages'] = snowball['pages']
-        report['snowball_hosts'] = len(snowball['hosts'])
-        report['errors'].extend(snowball['errors'])
-        found.extend(snowball['hosts'])
-        targets, seen, origins = [], set(), {}
-        for item in found:
-            host = item['host']
-            if host in seen or host in known or discovery.is_excluded(host, exclude):
-                continue
-            seen.add(host)
-            origins[host] = item
-            targets.append(host)
-            if len(targets) >= discovery.MAX_HOSTS:
-                break
-        for probe in discovery.probe_hosts(
-            targets,
-            aliases,
-            progress=lambda done, total, note: step('探测新主机', done, total, note),
-        ):
-            origin = origins.get(probe['host'], {})
-            probe['found_by'] = origin.get('found_by', '')
-            probe['source_url'] = origin.get('source_url', '')
-            probes.append(probe)
-        self._save_discovery(probes)
-        return {
-            'probed': report['probed'],
-            'search_calls': report['search_calls'],
-            'search_hosts': report['search_hosts'],
-            'snowball_pages': report['snowball_pages'],
-            'snowball_hosts': report['snowball_hosts'],
-            'new_hosts': len([host for host in targets if host not in existing]),
-            'found_hosts': len(found),
-            'skipped': report['skipped'],
-            'errors': report['errors'][:10],
-            'candidates': self.discovery_list(),
-        }
+        self._save_discovery(result['probes'])
+        summary = dict(result['summary'])
+        summary['candidates'] = self.discovery_list()
+        return summary
 
     def discovery_recheck(self, ids=None):
         """Re-probe hosts already in the list; state is never reset by a recheck."""

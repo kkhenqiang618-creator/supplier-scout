@@ -317,28 +317,7 @@ class PostgresLoginLimiter:
             db.execute('DELETE FROM login_attempts WHERE key=?', (str(key),))
 
 
-class DisabledSearchService:
-    """The cloud never stores a local search key, so the panel renders as not configured."""
-
-    @staticmethod
-    def public():
-        return {
-            'key_configured': False,
-            'key_protected': False,
-            'key_error': '',
-            'configured': False,
-            'queries': [],
-            'exclude': [],
-        }
-
-    @staticmethod
-    def read():
-        return {}
-
-
 class PostgresStore(Store):
-    search_service = DisabledSearchService()
-
     def __init__(self, database=None, bootstrap=True, model_service=True):
         self.database = database or Database()
         self.lock = threading.RLock()
