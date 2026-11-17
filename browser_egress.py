@@ -1,6 +1,7 @@
 """Explicit browser upstream, remote public DNS and IP-pinned HTTP CONNECT.
 
-Only operator configuration selects the proxy. Never let the upstream resolve
+SCOUT_BROWSER_PROXY_URL selects the proxy; without it the machine's own
+http proxy is used as the upstream (P33). Never let the upstream resolve
 page-controlled names: checked IPs are the tunnel targets, TLS retains SNI.
 """
 
