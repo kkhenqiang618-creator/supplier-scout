@@ -16,9 +16,9 @@ Only additive, non-rewriting migrations belong here.  `0002_json_and_time_column
 converts column types and rewrites table contents, so it stays a manual,
 maintenance-window step.
 
-Creating the objects needs the app role to own the schema (or to hold CREATE on it),
-which the runtime role `scout_app` does not: a missing object is then reported with
-the exact GRANT that unblocks it, and the request carries on instead of failing.
+Changing the tables needs the table owner, which the runtime role `scout_app` is
+not: a missing object is then reported with the migration file to run in the Supabase
+SQL editor, and the request carries on instead of failing.
 """
 
 import os
@@ -180,8 +180,7 @@ def _apply(database, pending):
                         '[schema] %s not applied: the app role may not change the schema.'
                         ' Run migrations/postgres/%s.sql as the database owner in the Supabase'
                         ' SQL editor; granting CREATE is not enough, because Postgres only lets'
-                        ' the table owner alter a table.'
-                        % (migration.version, migration.version),
+                        ' the table owner alter a table.' % (migration.version, migration.version),
                         flush=True,
                     )
                     continue
