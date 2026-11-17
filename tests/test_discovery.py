@@ -239,6 +239,54 @@ class DiscoveryUnitTests(unittest.TestCase):
             result = discovery.probe_host('epsilon.example')
         self.assertIn('robots.txt 无法确认允许访问', result['error'])
 
+    def test_robots_retry_message_names_the_status_code(self):
+        for code in (401, 403, 429, 500, 503):
+            with (
+                self.subTest(code=code),
+                mock.patch.object(
+                    discovery,
+                    'fetch_text',
+                    side_effect=urllib.error.HTTPError(
+                        'https://alpha.example/robots.txt', code, 'x', {}, None
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, 'HTTP %d' % code) as caught:
+                    discovery.robots_for('https://alpha.example')
+                self.assertIn('稍后重试', str(caught.exception))
+
+    def test_missing_robots_stays_permissive(self):
+        with mock.patch.object(
+            discovery,
+            'fetch_text',
+            side_effect=urllib.error.HTTPError(
+                'https://alpha.example/robots.txt', 404, 'Not Found', {}, None
+            ),
+        ):
+            parser = discovery.robots_for('https://alpha.example')
+        self.assertTrue(parser.can_fetch('SupplierScout', 'https://alpha.example/'))
+
+    def test_robots_shows_the_real_reason_instead_of_one_blanket_message(self):
+        cases = [
+            (ValueError('禁止访问内网、回环或保留地址'), '禁止访问内网'),
+            (urllib.error.URLError(OSError('禁止访问内网、回环或保留地址')), '禁止访问内网'),
+            (urllib.error.URLError('Tunnel connection failed: 502 Bad Gateway'), '本机代理连接失败'),
+            (urllib.error.URLError('Tunnel connection failed: 403 Forbidden'), '采集代理拒绝访问该地址'),
+            (TimeoutError('timed out'), 'timed out'),
+            (ValueError('采集代理 DNS 查询失败'), '采集代理 DNS 查询失败'),
+        ]
+        for error, expected in cases:
+            with (
+                self.subTest(error=expected),
+                mock.patch.object(discovery, 'fetch_text', side_effect=error),
+            ):
+                with self.assertRaises(ValueError) as caught:
+                    discovery.robots_for('https://alpha.example')
+                message = str(caught.exception)
+                self.assertIn('robots.txt 无法确认允许访问：', message)
+                self.assertIn(expected, message)
+                self.assertNotIn('稍后重试', message)
+
 
 class DiscoverySearchTests(unittest.TestCase):
     def test_hosts_from_text_keeps_absolute_urls_only(self):
