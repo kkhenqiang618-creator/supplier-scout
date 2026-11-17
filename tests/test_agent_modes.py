@@ -53,6 +53,8 @@ class AgentModeTests(unittest.TestCase):
 
         with (
             patch('engine.fetch', side_effect=urllib.error.URLError('TLS EOF')),
+            # The curl fallback only applies when no proxy route is configured (P33).
+            patch('browser_egress.configured_upstream', return_value=None),
             patch('browser_agent.validate_url', side_effect=lambda url: checked.append(url)),
             patch('browser_agent.subprocess.run', side_effect=curl),
             patch('browser_agent.shutil.which', return_value='/usr/bin/curl'),

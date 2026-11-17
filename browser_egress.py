@@ -1,6 +1,7 @@
 """Explicit browser upstream, remote public DNS and IP-pinned HTTP CONNECT.
 
-Only operator configuration selects the proxy. Never let the upstream resolve
+SCOUT_BROWSER_PROXY_URL selects the proxy; without it the machine's own
+http proxy is used as the upstream (P33). Never let the upstream resolve
 page-controlled names: checked IPs are the tunnel targets, TLS retains SNI.
 """
 
@@ -123,9 +124,44 @@ def _upstream(value):
     return Upstream(value)
 
 
+def _system_proxy_value():
+    """The proxy urllib would dial on its own: macOS/Windows settings or env vars."""
+    try:
+        proxies = urllib.request.getproxies() or {}
+    except Exception:
+        return None
+    for key in ('https', 'http', 'all'):
+        value = str(proxies.get(key) or '').strip()
+        if value:
+            return value if '://' in value else 'http://' + value
+    return None
+
+
+def system_upstream():
+    """Use the machine's own proxy as the guarded upstream route (P33).
+
+    Without ``SCOUT_BROWSER_PROXY_URL`` urllib silently dials the system proxy on
+    macOS; that peer is loopback, so the public-peer check refuses every request
+    and the discovery page failed as a whole. Treating the system proxy as an
+    explicit upstream keeps GuardProxy's address check (remote DNS, pinned public
+    IP) instead of bypassing it. A proxy GuardProxy cannot use (SOCKS, embedded
+    credentials, non-http) is ignored; direct mode then disables urllib's implicit
+    proxy so the same loopback failure cannot come back.
+    """
+    value = _system_proxy_value()
+    if not value:
+        return None
+    try:
+        return _upstream(value)
+    except ValueError:
+        return None
+
+
 def configured_upstream():
     value = os.environ.get('SCOUT_BROWSER_PROXY_URL', '').strip()
-    return _upstream(value) if value else None
+    if value:
+        return _upstream(value)
+    return system_upstream()
 
 
 @contextmanager
@@ -133,7 +169,9 @@ def collection_opener(*direct_handlers):
     """Auxiliary fetches share the browser route; direct mode preserves handlers."""
     upstream = configured_upstream()
     if upstream is None:
-        yield urllib.request.build_opener(*direct_handlers)
+        # Direct means direct: an implicit ProxyHandler would dial the loopback
+        # system proxy and every public-peer check would refuse it (P33).
+        yield urllib.request.build_opener(urllib.request.ProxyHandler({}), *direct_handlers)
         return
     from egress_proxy import GuardProxy
     from engine import SafeRedirect

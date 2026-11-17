@@ -268,7 +268,22 @@ def status_details(payload):
     return details
 
 
+def _network_reason(error):
+    """A short, human-readable reason for a failed fetch; never blank."""
+    detail = str(getattr(error, 'reason', '') or error).strip()
+    if 'Tunnel connection failed: 403' in detail:
+        return '采集代理拒绝访问该地址（域名无法解析或不是公开地址）'
+    if 'Tunnel connection failed' in detail:
+        return '本机代理连接失败，请检查系统代理设置（' + detail[:100] + '）'
+    return detail[:150] or error.__class__.__name__
+
+
 def robots_for(origin):
+    """Read robots.txt, naming what actually failed instead of one blanket message.
+
+    Only 401/403/429/5xx mean "not confirmed, retry later"; a 404 keeps the
+    permissive default, and anything else reports the real reason (P33).
+    """
     parser = urllib.robotparser.RobotFileParser()
     parser.set_url(origin + '/robots.txt')
     try:
@@ -276,10 +291,12 @@ def robots_for(origin):
         parser.parse(body.splitlines())
     except urllib.error.HTTPError as error:
         if error.code in (401, 403, 429) or error.code >= 500:
-            raise ValueError('robots.txt 无法确认允许访问，稍后重试') from None
+            raise ValueError(
+                'robots.txt 无法确认允许访问（HTTP ' + str(error.code) + '），稍后重试'
+            ) from None
         parser.parse([])
-    except ValueError:
-        raise ValueError('robots.txt 无法确认允许访问，稍后重试') from None
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise ValueError('robots.txt 无法确认允许访问：' + _network_reason(error)) from None
     return parser
 
 

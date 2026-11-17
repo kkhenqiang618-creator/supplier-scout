@@ -11,9 +11,12 @@ import browser_egress as net
 
 
 class EgressTests(unittest.TestCase):
-    def test_configuration_explicit_and_invalid_is_rejected(self):
-        with patch.dict(os.environ, {'HTTPS_PROXY': 'http://other:99'}, clear=True):
-            self.assertIsNone(net.configured_upstream())
+    def test_explicit_configuration_wins_and_invalid_is_rejected(self):
+        with (
+            patch.dict(os.environ, {'SCOUT_BROWSER_PROXY_URL': 'http://127.0.0.1:7897'}, clear=True),
+            patch('urllib.request.getproxies', return_value={'https': 'http://127.0.0.1:1080'}),
+        ):
+            self.assertEqual(net.configured_upstream().endpoint, ('127.0.0.1', 7897))
         for value in [
             'socks5://localhost:7897',
             'http://user:secret@localhost:7897',
@@ -26,6 +29,46 @@ class EgressTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, '采集代理'),
             ):
                 net.configured_upstream()
+
+    def test_system_proxy_becomes_the_guarded_upstream(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch('urllib.request.getproxies', return_value={'https': 'http://127.0.0.1:7897'}),
+        ):
+            self.assertEqual(net.configured_upstream().endpoint, ('127.0.0.1', 7897))
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch('urllib.request.getproxies', return_value={'http': '127.0.0.1:7898'}),
+        ):
+            self.assertEqual(net.configured_upstream().endpoint, ('127.0.0.1', 7898))
+
+    def test_unusable_system_proxy_is_ignored(self):
+        for value in [
+            'socks5://127.0.0.1:7897',
+            'http://user:secret@127.0.0.1:7897',
+            'https://127.0.0.1:7897',
+        ]:
+            with (
+                self.subTest(value=value),
+                patch.dict(os.environ, {}, clear=True),
+                patch('urllib.request.getproxies', return_value={'http': value}),
+            ):
+                self.assertIsNone(net.configured_upstream())
+
+    def test_direct_mode_cannot_dial_the_system_proxy(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch('urllib.request.getproxies', return_value={}),
+        ):
+            with net.collection_opener() as opener:
+                # build_opener drops an empty ProxyHandler from .handlers, so an
+                # absent proxy handler is exactly the direct mode we want.
+                proxies = [
+                    handler.proxies
+                    for handler in opener.handlers
+                    if isinstance(handler, net.urllib.request.ProxyHandler)
+                ]
+                self.assertEqual(proxies, [])
 
     def test_remote_resolution_checks_addresses_and_cache(self):
         p = net.Upstream('http://127.0.0.1:7897')
@@ -134,6 +177,142 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(req.host, '127.0.0.1:12345')
                 self.assertEqual(req._tunnel_host, 'example.com')
             cls.return_value.close.assert_called_once()
+
+
+class SystemProxyChainTests(unittest.TestCase):
+    """P33: the machine-wide proxy is a guarded upstream, not a blind direct dial."""
+
+    def setUp(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.pages = {
+            '/robots.txt': ('text/plain', 'User-agent: *\nAllow: /'),
+            '/api/status': (
+                'application/json',
+                json.dumps({'success': True, 'data': {'system_name': 'Local API'}}),
+            ),
+            '/api/pricing': (
+                'application/json',
+                json.dumps({'success': True, 'data': [{'model_name': 'kimi-k3.1-pro', 'model_ratio': 1}]}),
+            ),
+        }
+        pages = self.pages
+        seen = self.seen = []
+
+        class Site(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.0'
+
+            def do_GET(self):
+                seen.append((self.path, self.headers.get('Host')))
+                kind, body = pages.get(self.path, ('text/plain', 'missing'))
+                raw = body.encode()
+                self.send_response(200 if self.path in pages else 404)
+                self.send_header('Content-Type', kind)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *args):
+                pass
+
+        self.site = ThreadingHTTPServer(('127.0.0.1', 0), Site)
+        self.site.daemon_threads = True
+        threading.Thread(target=self.site.serve_forever, daemon=True).start()
+
+        # The fake proxy accepts CONNECT and relays to the fake site, so the real
+        # chain (urllib -> GuardProxy -> system proxy -> site) is exercised.
+        target = self.site.server_address
+        self.connects = []
+        self.server = socket.socket()
+        self.server.bind(('127.0.0.1', 0))
+        self.server.listen()
+        self.port = self.server.getsockname()[1]
+        threading.Thread(target=self.serve, args=(target,), daemon=True).start()
+
+    def serve(self, target):
+        import threading
+
+        def relay(source, sink):
+            try:
+                while True:
+                    chunk = source.recv(65536)
+                    if not chunk:
+                        break
+                    sink.sendall(chunk)
+            except OSError:
+                pass
+            finally:
+                try:
+                    sink.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+
+        def handle(conn):
+            with conn:
+                conn.settimeout(5)
+                head = b''
+                while not head.endswith(b'\r\n\r\n'):
+                    chunk = conn.recv(1)
+                    if not chunk:
+                        return
+                    head += chunk
+                self.connects.append(head)
+                conn.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+                with socket.create_connection(target, timeout=5) as upstream:
+                    worker = threading.Thread(target=relay, args=(conn, upstream), daemon=True)
+                    worker.start()
+                    relay(upstream, conn)
+                    worker.join(2)
+
+        while True:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                return
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+    def tearDown(self):
+        self.site.shutdown()
+        self.site.server_close()
+        self.server.close()
+        net._upstream.cache_clear()
+
+    def proxies(self):
+        return {'http': 'http://127.0.0.1:' + str(self.port)}
+
+    def test_pages_are_read_through_the_system_proxy(self):
+        import discovery
+
+        with (
+            patch.dict(os.environ, {'SCOUT_BROWSER_PROXY_URL': ''}),
+            patch('urllib.request.getproxies', return_value=self.proxies()),
+            patch.object(net.Upstream, '_query', return_value=['93.184.216.34']),
+        ):
+            robots = discovery.fetch_text('http://site.test/robots.txt')[0]
+            self.assertIn('Allow: /', robots)
+            parser = discovery.robots_for('http://site.test')
+            self.assertTrue(parser.can_fetch('SupplierScout', 'http://site.test/'))
+            status = json.loads(discovery.fetch_text('http://site.test/api/status')[0])
+            self.assertEqual(status['data']['system_name'], 'Local API')
+            pricing = json.loads(discovery.fetch_text('http://site.test/api/pricing')[0])
+            self.assertEqual(pricing['data'][0]['model_name'], 'kimi-k3.1-pro')
+        # The target was pinned to the checked public IP, never resolved by the proxy.
+        self.assertTrue(any(head.startswith(b'CONNECT 93.184.216.34:80 ') for head in self.connects))
+        self.assertEqual({host for _, host in self.seen}, {'site.test'})
+
+    def test_internal_targets_are_still_refused(self):
+        import discovery
+
+        with (
+            patch.dict(os.environ, {'SCOUT_BROWSER_PROXY_URL': ''}),
+            patch('urllib.request.getproxies', return_value=self.proxies()),
+            patch.object(net.Upstream, '_query', return_value=['127.0.0.1']),
+        ):
+            with self.assertRaisesRegex(ValueError, '内网'):
+                discovery.fetch_text('http://site.test/api/status')
+        self.assertEqual(self.seen, [])
+        self.assertEqual(self.connects, [])
 
 
 class SocketChainTests(unittest.TestCase):

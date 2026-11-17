@@ -364,6 +364,8 @@ class HardeningGuardTests(unittest.TestCase):
 
         with (
             patch('browser_agent.validate_url'),
+            # No machine-wide proxy: this asserts the direct-mode handlers (P33).
+            patch('browser_egress.configured_upstream', return_value=None),
             patch('browser_agent.urllib.request.build_opener', side_effect=opener),
             self.assertRaises(ValueError),
         ):

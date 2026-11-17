@@ -261,8 +261,12 @@ def validate_url(url):
         addresses = (upstream.resolve if upstream else socket.getaddrinfo)(
             parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80), type=socket.SOCK_STREAM
         )
-    except OSError:
+    except socket.gaierror:
         raise ValueError('域名无法解析（请检查采集网络出口）') from None
+    except OSError as error:
+        # Upstream checks report why an address was refused (private, DNS failure)
+        # instead of pretending every failure is a DNS problem (P33).
+        raise ValueError(str(error) or '域名无法解析（请检查采集网络出口）') from None
     if not addresses or any(not is_public_ip(row[4][0]) for row in addresses):
         raise ValueError('禁止访问内网、回环或保留地址')
     return url

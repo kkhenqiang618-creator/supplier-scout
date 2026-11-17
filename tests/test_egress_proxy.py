@@ -67,6 +67,8 @@ class IsPublicIpTests(unittest.TestCase):
             with (
                 self.subTest(ip=ip),
                 patch('engine.socket.getaddrinfo', fixed(ip)),
+                patch.dict(os.environ, {'SCOUT_BROWSER_PROXY_URL': ''}),
+                patch('urllib.request.getproxies', return_value={}),
                 self.assertRaisesRegex(ValueError, '内网'),
             ):
                 engine.validate_url('https://example.com/')
@@ -118,17 +120,21 @@ class ResolvePublicTests(unittest.TestCase):
                 'SCOUT_PROXY_ALLOW_PRIVATE',
             ]
         }
-        with patch.dict(os.environ, env):
+        with (
+            patch.dict(os.environ, env),
+            # A machine-wide proxy must not silently replace this loopback resolver (P33).
+            patch('browser_egress.configured_upstream', return_value=None),
+        ):
             proxy = GuardProxy(resolver=fixed('127.0.0.1'))
             try:
                 self.assertFalse(proxy.allow_loopback)
             finally:
                 proxy.close()
-        proxy = GuardProxy(allow_loopback_for_tests='true')
-        try:
-            self.assertFalse(proxy.allow_loopback)
-        finally:
-            proxy.close()
+            proxy = GuardProxy(allow_loopback_for_tests='true')
+            try:
+                self.assertFalse(proxy.allow_loopback)
+            finally:
+                proxy.close()
 
 
 def exchange(port, payload, read=65536):
@@ -145,6 +151,10 @@ def exchange(port, payload, read=65536):
 
 class ProxySocketTests(unittest.TestCase):
     def setUp(self):
+        # These fixtures dial loopback; no machine-wide proxy may be picked up (P33).
+        patcher = patch('browser_egress.configured_upstream', return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.proxy = GuardProxy(
             allow_loopback_for_tests=True,
             resolver=lambda h, p, **k: (
